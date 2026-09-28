@@ -24,10 +24,39 @@ class AiSidecarTests(unittest.TestCase):
         )
 
     def test_context_is_parsed(self):
+        self.assertEqual(self.event["mode"], "teams")
         self.assertEqual(self.event["map"], "de_dust2")
         self.assertEqual(self.event["place"], "bombsiteb")
         self.assertEqual(self.event["visible_slots"], [4, 5])
         self.assertTrue(self.event["bomb_planted"])
+
+    def test_ffa_chat_is_public_and_cannot_order_a_bot(self):
+        event = sidecar.parse_event(
+            "2026-09-28 (INFO): [YaPB ai] chat bot=2 player=0 channel=all "
+            "mode=ffa team=2 map=de_dust2 place=middle weapon=weapon_ak47 hp=67 "
+            "money=3200 friends=0 enemies=9 bomb=0 round=42 visible=1 "
+            "slots=4,-1,-1 text=hello\n")
+        self.assertEqual(event["mode"], "ffa")
+        self.assertEqual(sidecar.validate_model_choice(
+            {"reply": "yo", "action": "none"}, event),
+            ['yb ai 2 chat all 0 "yo"'])
+        with self.assertRaises(ValueError):
+            sidecar.validate_model_choice({"reply": "yo", "action": "jump"}, event)
+
+    def test_player_reply_language_tracks_english_and_tagalog(self):
+        self.assertEqual(sidecar.chat_language("hello bots"), "en")
+        self.assertEqual(sidecar.chat_language("kamusta bots"), "tl")
+        self.assertEqual(sidecar.chat_language("pwede drop ak ba"), "tl")
+        self.assertEqual(sidecar.chat_language("ikaw bot ba"), "tl")
+        english = dict(self.event, text="hello", channel="all")
+        with self.assertRaises(ValueError):
+            sidecar.validate_model_choice({"reply": "sige", "action": "none"}, english)
+        tagalog = dict(self.event, text="kamusta", channel="all")
+        self.assertEqual(sidecar.validate_model_choice(
+            {"reply": "ayos lang", "action": "none"}, tagalog),
+            ['yb ai 2 chat all 0 "ayos lang"'])
+        with self.assertRaises(ValueError):
+            sidecar.validate_model_choice({"reply": "im good", "action": "none"}, tagalog)
 
     def test_human_chat_preempts_event_flood(self):
         prefix = "2026-09-28 11:00:00 (INFO): [YaPB ai] "
@@ -83,7 +112,7 @@ class AiSidecarTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "replies.sqlite3"
             cache = sidecar.ReplyCache(path, max_variants=100)
-            key = "de_dust2\x1fteam\x1fnt"
+            key = "de_dust2\x1fteams\x1fteam\x1fen\x1fnt"
             for number in range(102):
                 cache.remember(key, f"nt {number}")
             self.assertEqual(len(cache.variants(key)), 100)
@@ -141,7 +170,7 @@ class AiSidecarTests(unittest.TestCase):
             local = sidecar.ReplyCache(pathlib.Path(directory) / "replies.sqlite3")
             shared = sidecar.SharedReplyCache(local, "https://example.test/internal/yapb/replies",
                                               "x" * 32)
-            key = "de_dust2\x1fteam\x1fnt"
+            key = "de_dust2\x1fteams\x1fteam\x1fen\x1fnt"
             calls = []
             class Response:
                 def __init__(self, data): self.data = data
@@ -158,6 +187,11 @@ class AiSidecarTests(unittest.TestCase):
             self.assertEqual(json.loads(calls[1][0].data)["reply"], "unlucky")
             self.assertEqual(set(local.variants(key)), {"nice try", "unlucky"})
             local.db.close()
+
+    def test_cache_separates_ffa_public_speech_from_team_speech(self):
+        team_event = {"map": "de_dust2", "mode": "teams", "channel": "team", "text": "my bad"}
+        ffa_event = {"map": "de_dust2", "mode": "ffa", "channel": "all", "text": "my bad"}
+        self.assertNotEqual(sidecar.ReplyCache.key(team_event), sidecar.ReplyCache.key(ffa_event))
 
     def test_local_queue_is_private_and_atomic(self):
         with tempfile.TemporaryDirectory() as directory:

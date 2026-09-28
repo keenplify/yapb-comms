@@ -46,7 +46,7 @@ inline bool startsWithGreeting (const char *raw) {
    char words[97] {};
    bool question = false;
    if (!normalizeTeamPhrase (raw, words, question)) return false;
-   const char *greetings[] = { "hello", "hey", "hi", "yo" };
+   const char *greetings[] = { "hello", "hey", "hi", "yo", "kamusta", "kumusta", "musta", "uy" };
    for (const auto *greeting : greetings) {
       const size_t length = std::strlen (greeting);
       if (std::strncmp (words, greeting, length) == 0
@@ -59,6 +59,12 @@ inline bool startsWithGreeting (const char *raw) {
 // fragments stay with the built-in game communication path.
 inline bool isConversationalStatement (const char *words) {
    if (!words || !*words) return false;
+   const char *tagalogOpeners[] = { "ano", "bakit", "saan", "paano", "pwede", "salamat" };
+   for (const auto *opener : tagalogOpeners) {
+      const size_t length = std::strlen (opener);
+      if (std::strncmp (words, opener, length) == 0
+         && (words[length] == '\0' || words[length] == ' ')) return true;
+   }
    const char *firstSpace = std::strchr (words, ' ');
    if (!firstSpace) return false;
    if (std::strchr (firstSpace + 1, ' ')) return true;

@@ -70,6 +70,9 @@ private:
    float m_postPlantChatTime {};
    bool m_postPlantChatSent {};
    int m_roundKills[kGameMaxPlayers] {};
+   int m_ffaKillStreak[kGameMaxPlayers] {};
+   float m_ffaSpreeDue[kGameMaxPlayers] {};
+   float m_nextFfaSpreeChatTime {};
    int m_pendingKillReaction[kGameMaxPlayers] {};
    int m_killReactionTeam[kGameMaxPlayers] {};
    float m_killReactionTime[kGameMaxPlayers] {};

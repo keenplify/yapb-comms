@@ -31,26 +31,31 @@ from llm_intent_bridge import to_command
 
 EVENT = re.compile(
     r"\[YaPB ai\] (chat|event) bot=(\d+) player=(-?\d+) channel=(team|all) "
-    r"team=(\d+) map=([a-z0-9_]+) place=([a-z0-9_]+) "
+    r"(?:mode=(teams|ffa) )?team=(\d+) map=([a-z0-9_]+) place=([a-z0-9_]+) "
     r"weapon=([a-zA-Z0-9_]+) hp=(-?\d+) money=(\d+) friends=(\d+) "
     r"enemies=(\d+) bomb=([01]) round=(-?\d+) visible=(\d+) "
     r"slots=(-?\d+),(-?\d+),(-?\d+) text=([a-z0-9 ,?!'-]{1,96})$"
 )
 SAFE_REPLY = re.compile(r"[a-z0-9 .,?!'-]{1,30}\Z")
 SYSTEM_PROMPT = (
-    "You are a Counter-Strike 1.6 teammate. Reply like a real player: "
+    "You are a Counter-Strike 1.6 player. Reply like a real player: "
     "lowercase, at most 30 characters, brief and natural. No periods. Never reveal that "
     "you are an AI or claim certainty about being human. Return only a JSON "
     "object with keys reply and action. action is one of none, jump, follow. "
-    "Use jump or follow only for a direct teammate request; otherwise none. "
+    "Use jump or follow only for a direct teammate request in teams mode; otherwise none. "
+    "In ffa mode everyone is an opponent: use all chat and never issue actions. "
+    "Match the player's language: English, Tagalog, or Taglish. If the player "
+    "writes English, reply in English. If they write Tagalog or Taglish, reply "
+    "in natural Tagalog or Taglish. Never switch to an unrelated language. "
     "No tactics or enemy facts unless provided by the player."
 )
 EVENT_PROMPT = (
-    "You are a Counter-Strike 1.6 teammate. Rephrase the supplied bot line "
+    "You are a Counter-Strike 1.6 player. Rephrase the supplied bot line "
     "like brief real player chat. lowercase, no periods, at most 30 characters. "
     "Keep every number, location, and buy or eco decision exactly. Do not "
     "invent an enemy, position, weapon, or action. Use fresh wording when "
-    "possible. Return only JSON with "
+    "possible. Always use English for these bot lines. In ffa mode everyone is "
+    "an opponent and speech is public. Return only JSON with "
     "reply and action; action must be none."
 )
 CONFIG_KEYS = (
@@ -108,19 +113,33 @@ def parse_event(line):
     match = EVENT.search(line.rstrip("\r\n"))
     if not match:
         return None
-    (kind, bot, player, channel, team, map_name, place, weapon, hp, money,
+    (kind, bot, player, channel, mode, team, map_name, place, weapon, hp, money,
      friends, enemies, bomb, round_seconds, visible_count,
      slot1, slot2, slot3, text) = match.groups()
     if (int(bot) >= 32 or (kind == "chat" and not 0 <= int(player) < 32)
             or (kind == "event" and int(player) != -1)):
         return None
     return {"kind": kind, "bot_slot": int(bot), "player_slot": int(player),
-            "channel": channel, "team": int(team), "text": text,
+            "channel": channel, "mode": mode or "teams", "team": int(team), "text": text,
             "map": map_name, "place": place, "weapon": weapon,
             "hp": int(hp), "money": int(money), "friends_alive": int(friends),
             "enemies_alive": int(enemies), "bomb_planted": bomb == "1",
             "round_seconds": int(round_seconds), "visible_count": int(visible_count),
             "visible_slots": [int(value) for value in (slot1, slot2, slot3) if int(value) >= 0]}
+
+
+def chat_language(text):
+    """Small deterministic hint for short Tagalog/Taglish player messages."""
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    strong = {"kamusta", "kumusta", "musta", "bakit", "saan", "paano", "pwede",
+              "salamat", "sige", "hindi", "wala", "meron", "sakin", "natin",
+              "nyo", "mga", "dito", "diyan", "yan", "ganun", "ganyan", "tara",
+              "opo", "oo", "pre", "ano", "ikaw", "kayo", "tayo", "kami",
+              "lang", "naman", "talaga", "ingat", "ayos", "gusto", "kailangan",
+              "sino", "kailan", "sali", "laro", "laban", "tama",
+              "pasensya", "sandali", "ulit", "teka", "grabe"}
+    weak = {"ako", "ko", "mo", "ka", "ba", "ang", "sa", "ng", "pa", "po"}
+    return "tl" if words & strong or len(words & weak) >= 2 else "en"
 
 
 def select_live_events(lines, now=None):
@@ -153,6 +172,11 @@ def validate_model_choice(choice, event):
     reply = reply.replace(".", "").strip()
     if not SAFE_REPLY.fullmatch(reply):
         raise ValueError("model reply is unsafe or too long")
+    expected_language = "en" if event.get("kind") == "event" else chat_language(event["text"])
+    if expected_language == "en" and chat_language(reply) == "tl":
+        raise ValueError("model switched an English reply to Tagalog")
+    if expected_language == "tl" and chat_language(reply) != "tl":
+        raise ValueError("model switched a Tagalog reply to English")
     if action not in ("none", "jump", "follow"):
         raise ValueError("model action is not approved")
     if event.get("kind") == "event":
@@ -167,8 +191,8 @@ def validate_model_choice(choice, event):
         if any(words.count(word) > required.count(word) for word in set(words)
                if word.isdigit() or word in ("mid", "eco", "buy")):
             raise ValueError("model invented a tactical fact")
-    if action != "none" and event["channel"] != "team":
-        raise ValueError("all-chat cannot request bot actions")
+    if action != "none" and (event["channel"] != "team" or event.get("mode") == "ffa"):
+        raise ValueError("all-chat and ffa cannot request bot actions")
     commands = []
     if action == "jump":
         commands.append(to_command({"action": "jump", "bot_slot": event["bot_slot"]}))
@@ -189,7 +213,9 @@ def chat_command(event, reply):
 
 def ask_provider(event, api_key, api_url, model, timeout, variants=()):
     message = {
+        "mode": event.get("mode", "teams"),
         "channel": event["channel"],
+        "reply_language": "en" if event.get("kind") == "event" else chat_language(event["text"]),
         "bot_line" if event.get("kind") == "event" else "player_message": event["text"],
         "bot_state": {key: event[key] for key in (
             "map", "place", "weapon", "hp", "money", "friends_alive",
@@ -304,7 +330,8 @@ class ReplyCache:
 
     @staticmethod
     def key(event):
-        return "\x1f".join((event["map"], event["channel"], event["text"]))
+        return "\x1f".join((event["map"], event.get("mode", "teams"),
+                            event["channel"], "en", event["text"]))
 
     def variants(self, key):
         return [row[0] for row in self.db.execute(
@@ -344,8 +371,9 @@ class SharedReplyCache:
 
     @staticmethod
     def fields(key):
-        map_name, channel, line = key.split("\x1f", 2)
-        return {"map": map_name, "channel": channel, "line": line}
+        map_name, mode, channel, language, line = key.split("\x1f", 4)
+        return {"map": map_name, "mode": mode, "channel": channel,
+                "language": language, "line": line}
 
     def variants(self, key):
         now = time.monotonic()
@@ -576,7 +604,8 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
             offset = stream.tell()
         for event in select_live_events(lines):
             if not connected:
-                fallback = event["text"] if event["kind"] == "event" else "sry lagging"
+                fallback = event["text"] if event["kind"] == "event" else (
+                    "sandali" if chat_language(event["text"]) == "tl" else "sry lagging")
                 try:
                     send_local(chat_command(event, fallback), args.queue_dir)
                 except Exception as exc:
@@ -632,7 +661,8 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
             if not can_request:
                 try:
                     time.sleep(random.uniform(0.6, 1.5))
-                    send_local(chat_command(event, "one sec"), args.queue_dir)
+                    line = "sandali" if chat_language(event["text"]) == "tl" else "one sec"
+                    send_local(chat_command(event, line), args.queue_dir)
                 except Exception as exc:
                     diagnostics.error("rate-limit reply failed: %s: %s", type(exc).__name__, exc)
                 continue
@@ -650,7 +680,8 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
                 diagnostics.error("provider request failed: %s: %s", type(exc).__name__, exc)
                 try:
                     time.sleep(random.uniform(0.6, 1.5))
-                    send_local(chat_command(event, "sry lagging"), args.queue_dir)
+                    line = "sandali lag ako" if chat_language(event["text"]) == "tl" else "sry lagging"
+                    send_local(chat_command(event, line), args.queue_dir)
                 except Exception as queue_exc:
                     diagnostics.error("fallback failed: %s: %s",
                                       type(queue_exc).__name__, queue_exc)
@@ -666,7 +697,8 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
                 print(f"AI event skipped: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
                 diagnostics.error("event skipped: %s: %s", type(exc).__name__, exc)
                 try:
-                    send_local(chat_command(event, "what u mean"), args.queue_dir)
+                    line = "ano ibig mo sabihin" if chat_language(event["text"]) == "tl" else "what u mean"
+                    send_local(chat_command(event, line), args.queue_dir)
                 except Exception:
                     pass
     ready.unlink(missing_ok=True)

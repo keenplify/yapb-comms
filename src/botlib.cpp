@@ -3186,8 +3186,14 @@ void Bot::update () {
    m_isAlive = game.isAliveEntity (ent ());
    if (!m_isAlive && m_pendingDeathLineTime > 0.0f && m_pendingDeathLineTime <= game.time ()) {
       m_pendingDeathLineTime = 0.0f;
-      constexpr const char *lines[] = { "My bad.", "Unlucky.", "Nice try." };
-      sendTeamCallout (lines[m_index % 3]);
+      if (game.is (GameFlags::FreeForAll)) {
+         constexpr const char *lines[] = { "ouch", "wp", "got me", "my bad" };
+         sendAddressedReply (lines[rg (0, 3)], false);
+      }
+      else {
+         constexpr const char *lines[] = { "My bad.", "Unlucky.", "Nice try." };
+         sendTeamCallout (lines[m_index % 3]);
+      }
    }
    m_team = game.getPlayerTeam (ent ());
    m_healthValue = cr::clamp (pev->health, 0.0f, 99999.9f);

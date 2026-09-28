@@ -47,7 +47,8 @@ void BotManager::logAiEvent (Bot *bot, edict_t *player, StringRef text, bool tea
    int visibleCount = 0;
    for (const auto &client : util.getClients ()) {
       if (!(client.flags & ClientFlags::Used) || client.ent == nullptr
-         || client.team2 == bot->m_team || !game.isAliveEntity (client.ent)
+         || (game.is (GameFlags::FreeForAll) ? client.ent == bot->ent () : client.team2 == bot->m_team)
+         || !game.isAliveEntity (client.ent)
          || !bot->isInViewCone (client.ent->v.origin)
          || !bot->seesEntity (client.ent->v.origin)) continue;
       if (visibleCount < 3) visible[visibleCount] = game.indexOfPlayer (client.ent);
@@ -68,10 +69,11 @@ void BotManager::logAiEvent (Bot *bot, edict_t *player, StringRef text, bool tea
    char timestamp[20] {};
    const auto local = std::localtime (&now);
    if (local) std::strftime (timestamp, sizeof (timestamp), "%Y-%m-%d %H:%M:%S", local);
-   std::fprintf (stream, "%s (INFO): [YaPB ai] %s bot=%d player=%d channel=%s team=%d map=%s place=%s weapon=%s hp=%d money=%d friends=%d enemies=%d bomb=%d round=%.0f visible=%d slots=%d,%d,%d text=%s\n",
+   std::fprintf (stream, "%s (INFO): [YaPB ai] %s bot=%d player=%d channel=%s mode=%s team=%d map=%s place=%s weapon=%s hp=%d money=%d friends=%d enemies=%d bomb=%d round=%.0f visible=%d slots=%d,%d,%d text=%s\n",
       timestamp,
       canned ? "event" : "chat", bot->m_index, player ? game.indexOfPlayer (player) : -1,
-      teamOnly ? "team" : "all", bot->m_team, game.getMapName (), place.chars (), weapon.chars (),
+      teamOnly ? "team" : "all", game.is (GameFlags::FreeForAll) ? "ffa" : "teams",
+      bot->m_team, game.getMapName (), place.chars (), weapon.chars (),
       static_cast <int> (bot->pev->health), bot->m_moneyAmount,
       bot->m_numFriendsLeft, bot->m_numEnemiesLeft, gameState.isBombPlanted (),
       game.time () - gameState.getRoundStartTime (), visibleCount,
@@ -946,7 +948,22 @@ void BotManager::maintainRoundChat () {
 }
 
 void BotManager::maintainKillReactions () {
-   if (game.is (GameFlags::FreeForAll)) return;
+   if (game.is (GameFlags::FreeForAll)) {
+      if (game.time () < m_nextFfaSpreeChatTime) return;
+      for (int slot = 0; slot < kGameMaxPlayers; ++slot) {
+         if (m_ffaSpreeDue[slot] <= 0.0f || game.time () < m_ffaSpreeDue[slot]) continue;
+         m_ffaSpreeDue[slot] = 0.0f;
+         Bot *speaker = findBotByIndex (slot);
+         if (!speaker || !speaker->m_isAlive || speaker->m_commsStyle == CommsStyle::RadioOnly
+            || (speaker->m_lastTacticalChatTime > 0.0f
+               && speaker->m_lastTacticalChatTime + 10.0f > game.time ())) continue;
+         constexpr const char *lines[] = { "im on one", "ok im cooking", "on a roll", "keep em coming" };
+         speaker->sendAddressedReply (lines[rg (0, 3)], false);
+         m_nextFfaSpreeChatTime = game.time () + rg (12.0f, 20.0f);
+         break;
+      }
+      return;
+   }
    constexpr const char *lines[] = { "nice 2k", "yo 3k", "4k, go ace", "ace!!" };
    for (int slot = 0; slot < kGameMaxPlayers; ++slot) {
       const int kills = m_pendingKillReaction[slot];
@@ -2084,6 +2101,23 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
    const auto killerTeam = game.getRealPlayerTeam (killer);
    const auto victimTeam = game.getRealPlayerTeam (victim);
 
+   if (game.is (GameFlags::FreeForAll)) {
+      const int victimSlot = game.indexOfPlayer (victim);
+      if (victimSlot >= 0 && victimSlot < kGameMaxPlayers) {
+         m_ffaKillStreak[victimSlot] = 0;
+         m_ffaSpreeDue[victimSlot] = 0.0f;
+      }
+      if (game.isPlayerEntity (killer) && killer != victim) {
+         const int killerSlot = game.indexOfPlayer (killer);
+         if (killerSlot >= 0 && killerSlot < kGameMaxPlayers) {
+            const int streak = ++m_ffaKillStreak[killerSlot];
+            if (streak >= 3 && (streak == 3 || streak % 2 == 1) && rg.chance (35)) {
+               m_ffaSpreeDue[killerSlot] = game.time () + rg (1.0f, 2.2f);
+            }
+         }
+      }
+   }
+
    if (game.isPlayerEntity (killer) && killer != victim
       && (killerTeam == Team::CT || killerTeam == Team::Terrorist)
       && (victimTeam == Team::CT || victimTeam == Team::Terrorist)
@@ -2099,7 +2133,7 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
       }
    }
 
-   if (cv_radio_mode.as <int> () == 2) {
+   if (!game.is (GameFlags::FreeForAll) && cv_radio_mode.as <int> () == 2) {
       // need to send congrats on well placed shot
       for (const auto &notify : bots) {
          if (notify->m_isAlive
@@ -2154,7 +2188,7 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
 
       victimBot->m_isAlive = false;
       if (victimBot->m_commsStyle != CommsStyle::RadioOnly && rg.chance (25)) {
-         victimBot->m_pendingDeathLineTime = game.time () + 0.7f;
+         victimBot->m_pendingDeathLineTime = game.time () + rg (0.7f, 1.5f);
       }
    }
 
@@ -2166,7 +2200,7 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
    // did a human kill a bot on his team?
    else {
       if (victimBot != nullptr) {
-         if (killerTeam == victimBot->m_team) {
+         if (!game.is (GameFlags::FreeForAll) && killerTeam == victimBot->m_team) {
             victimBot->m_voteKickIndex = game.indexOfEntity (killer);
 
             for (const auto &notify : bots) {
@@ -2806,14 +2840,16 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
       return;
    }
 
-   if ((cmd == "say" || cmd == "say_team") && !game.isFakeClientEntity (ent)) {
+   if (!game.is (GameFlags::FreeForAll) && (cmd == "say" || cmd == "say_team")
+      && !game.isFakeClientEntity (ent)) {
       const int speakerTeam = game.getRealPlayerTeam (ent);
       if (speakerTeam == Team::CT || speakerTeam == Team::Terrorist) {
          m_lastHumanTeamChat[speakerTeam] = game.time ();
       }
    }
 
-   if (cmd == "say_team" && !game.isFakeClientEntity (ent) && game.isAliveEntity (ent)) {
+   if (!game.is (GameFlags::FreeForAll) && cmd == "say_team"
+      && !game.isFakeClientEntity (ent) && game.isAliveEntity (ent)) {
       TeamAllocation allocation {};
       if (parseTeamAllocation (engfuncs.pfnCmd_Args (), allocation)) {
          const int team = game.getRealPlayerTeam (ent);
@@ -3147,7 +3183,8 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
    if (cmd.startsWith ("say")) {
       // Addressed replies preserve the player's channel. Orders above are
       // deliberately restricted to say_team and never enter this path.
-      if (!game.isFakeClientEntity (ent) && (cmd == "say" || cmd == "say_team")
+      if (!game.isFakeClientEntity (ent)
+         && (cmd == "say" || (!game.is (GameFlags::FreeForAll) && cmd == "say_team"))
          && (m_lastAddressedReplyTime <= 0.0f || m_lastAddressedReplyTime + 8.0f < game.time ())) {
          char words[97] {};
          bool question = false;
@@ -3228,14 +3265,16 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
       if (radioCommand != 0) {
          radioCommand += 10 * (target.radio - 1);
 
-         if (!game.isFakeClientEntity (ent) && (target.team == Team::CT || target.team == Team::Terrorist)) {
+         if (!game.is (GameFlags::FreeForAll) && !game.isFakeClientEntity (ent)
+            && (target.team == Team::CT || target.team == Team::Terrorist)) {
             m_humanCaptain[target.team] = true;
             m_lastHumanTeamChat[target.team] = game.time ();
          }
 
          // Bot radio is information for players, not a fresh team order.
          // Relaying it to every bot creates chains of unrelated replies.
-         if (!game.isFakeClientEntity (ent) && radioCommand != Radio::RogerThat
+         if (!game.is (GameFlags::FreeForAll) && !game.isFakeClientEntity (ent)
+            && radioCommand != Radio::RogerThat
             && radioCommand != Radio::Negative && radioCommand != Radio::ReportingIn) {
             for (const auto &bot : bots) {
 
@@ -3421,9 +3460,12 @@ void BotManager::initRound () {
    m_postPlantChatSent = false;
    for (int slot = 0; slot < kGameMaxPlayers; ++slot) {
       m_roundKills[slot] = 0;
+      m_ffaKillStreak[slot] = 0;
+      m_ffaSpreeDue[slot] = 0.0f;
       m_pendingKillReaction[slot] = 0;
       m_killReactionTime[slot] = 0.0f;
    }
+   m_nextFfaSpreeChatTime = 0.0f;
    m_pendingOrderAcks.clear ();
    m_nextCommsDebugTime = 0.0f;
    for (int slot = 0; slot < kGameMaxPlayers; ++slot) {

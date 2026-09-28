@@ -449,7 +449,7 @@ void Bot::sendTeamCallout (StringRef message) {
 void Bot::sendAddressedReply (StringRef message, bool teamOnly, bool fromAi) {
    // Purposeful messages work while the old random chat bank is disabled.
    // All callers use fixed strings, never text copied from a player.
-   if (m_isCreature || message.empty () || game.is (GameFlags::FreeForAll)
+   if (m_isCreature || message.empty () || (game.is (GameFlags::FreeForAll) && teamOnly)
       || (!fromAi && m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())) {
       return;
    }
