@@ -16,6 +16,8 @@ class LlmIntentBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.to_command({"action": "dead_chat", "bot_slot": 2, "line": 1}), "yb ai 2 dead_chat 1")
         self.assertEqual(bridge.to_command({"action": "chat", "bot_slot": 2, "channel": "team", "text": "yeah, maybe"}), 'yb ai 2 chat team "yeah, maybe"')
         self.assertEqual(bridge.to_command({"action": "chat", "bot_slot": 2, "channel": "team", "player_slot": 0, "text": "yeah, maybe"}), 'yb ai 2 chat team 0 "yeah, maybe"')
+        self.assertEqual(bridge.to_command({"action": "chat", "bot_slot": 2, "channel": "all", "text": "привет"}), 'yb ai 2 chat all "привет"')
+        self.assertEqual(bridge.to_command({"action": "chat", "bot_slot": 2, "channel": "all", "text": "你好"}), 'yb ai 2 chat all "你好"')
 
     def test_rejects_unapproved_or_injected_values(self):
         cases = [

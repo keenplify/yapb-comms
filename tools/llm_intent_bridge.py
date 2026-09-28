@@ -8,6 +8,7 @@ rate limits. The sidecar writes validated commands to a private local queue.
 import json
 import re
 import sys
+import unicodedata
 
 
 def slot(value: object, name: str) -> int:
@@ -44,7 +45,10 @@ def to_command(payload: object) -> str:
         line = payload["text"]
         if channel not in ("team", "all") or not isinstance(line, str):
             raise ValueError("invalid chat channel or text")
-        if not 1 <= len(line) <= 30 or not re.fullmatch(r"[a-z0-9 .,?!'-]+", line):
+        if (not 1 <= len(line) <= 30 or len(line.encode("utf-8")) > 90
+                or not all((unicodedata.category(char)[0] in "LMN"
+                            and char == char.lower()) or char in " .,?!'-"
+                           for char in line)):
             raise ValueError("chat text must be lowercase, safe, and at most 30 characters")
         recipient = (f" {slot(payload['player_slot'], 'player_slot')}"
                      if "player_slot" in payload else "")

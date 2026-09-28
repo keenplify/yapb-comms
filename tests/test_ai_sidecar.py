@@ -48,6 +48,8 @@ class AiSidecarTests(unittest.TestCase):
         self.assertEqual(sidecar.chat_language("kamusta bots"), "tl")
         self.assertEqual(sidecar.chat_language("pwede drop ak ba"), "tl")
         self.assertEqual(sidecar.chat_language("ikaw bot ba"), "tl")
+        self.assertEqual(sidecar.chat_language("hola amigo"), "auto")
+        self.assertEqual(sidecar.chat_language("привет"), "auto")
         english = dict(self.event, text="hello", channel="all")
         with self.assertRaises(ValueError):
             sidecar.validate_model_choice({"reply": "sige", "action": "none"}, english)
@@ -57,6 +59,14 @@ class AiSidecarTests(unittest.TestCase):
             ['yb ai 2 chat all 0 "ayos lang"'])
         with self.assertRaises(ValueError):
             sidecar.validate_model_choice({"reply": "im good", "action": "none"}, tagalog)
+        spanish = dict(self.event, text="hola amigo", channel="all")
+        self.assertEqual(sidecar.validate_model_choice(
+            {"reply": "hola, que tal", "action": "none"}, spanish),
+            ['yb ai 2 chat all 0 "hola, que tal"'])
+        cyrillic = dict(self.event, text="привет", channel="all")
+        self.assertEqual(sidecar.validate_model_choice(
+            {"reply": "привет", "action": "none"}, cyrillic),
+            ['yb ai 2 chat all 0 "привет"'])
 
     def test_human_chat_preempts_event_flood(self):
         prefix = "2026-09-28 11:00:00 (INFO): [YaPB ai] "
@@ -192,6 +202,20 @@ class AiSidecarTests(unittest.TestCase):
         team_event = {"map": "de_dust2", "mode": "teams", "channel": "team", "text": "my bad"}
         ffa_event = {"map": "de_dust2", "mode": "ffa", "channel": "all", "text": "my bad"}
         self.assertNotEqual(sidecar.ReplyCache.key(team_event), sidecar.ReplyCache.key(ffa_event))
+
+    def test_conversation_context_is_bounded_and_isolated(self):
+        context = sidecar.ConversationContext(ttl=30, max_exchanges=2)
+        event = dict(self.event, kind="chat", text="hello", player_slot=0,
+                     bot_slot=2, channel="all", mode="teams")
+        context.remember(event, "hey", now=10)
+        self.assertEqual(context.recent(event, now=11)[-1]["text"], "hey")
+        self.assertEqual(context.recent(dict(event, player_slot=1), now=11), [])
+        self.assertEqual(context.recent(dict(event, channel="team"), now=11), [])
+        self.assertEqual(context.recent(dict(event, mode="ffa"), now=11), [])
+        context.remember(dict(event, text="you good"), "yeah", now=12)
+        context.remember(dict(event, text="and now"), "still good", now=13)
+        self.assertEqual(len(context.recent(event, now=14)), 4)
+        self.assertEqual(context.recent(event, now=44), [])
 
     def test_local_queue_is_private_and_atomic(self):
         with tempfile.TemporaryDirectory() as directory:

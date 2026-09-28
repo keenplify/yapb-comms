@@ -399,7 +399,7 @@ void BotManager::frame () {
       else {
          struct stat info {};
          if (stat (commandPath.chars (), &info) == 0) {
-            char line[128] {};
+            char line[160] {};
             bool valid = info.st_size > 0 && info.st_size < static_cast <long> (sizeof (line))
                && std::time (nullptr) >= info.st_mtime && std::time (nullptr) - info.st_mtime <= 15;
             if (valid) {
@@ -443,9 +443,9 @@ void BotManager::frame () {
                         const char ch = *pos++;
                         safe = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
                            || ch == ' ' || ch == '.' || ch == ',' || ch == '?' || ch == '!'
-                           || ch == '\'' || ch == '-';
+                           || ch == '\'' || ch == '-' || static_cast <unsigned char> (ch) >= 128;
                      }
-                     safe = safe && pos > start && pos - start <= 30 && *pos++ == '"' && *pos == '\0';
+                     safe = safe && pos > start && pos - start <= 90 && *pos++ == '"' && *pos == '\0';
                   }
                   else safe = false;
                }
@@ -3188,7 +3188,24 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
          && (m_lastAddressedReplyTime <= 0.0f || m_lastAddressedReplyTime + 8.0f < game.time ())) {
          char words[97] {};
          bool question = false;
-         if (normalizeTeamPhrase (engfuncs.pfnCmd_Args (), words, question)) {
+         const bool normalized = normalizeTeamPhrase (engfuncs.pfnCmd_Args (), words, question);
+         bool international = false;
+         if (!normalized && cv_ai_bridge && aiBridgeReady ()) {
+            const char *raw = engfuncs.pfnCmd_Args ();
+            if (raw && *raw == '"') ++raw;
+            size_t length = 0;
+            while (raw && raw[length] && raw[length] != '"' && length < sizeof (words) - 1) {
+               const unsigned char ch = static_cast <unsigned char> (raw[length]);
+               if (ch < 32 || ch == ';' || ch == '\\') break;
+               international |= ch >= 128;
+               words[length] = raw[length];
+               ++length;
+            }
+            words[length] = '\0';
+            international = international && length > 0 && length < sizeof (words) - 1
+               && (raw[length] == '\0' || raw[length] == '"');
+         }
+         if (normalized || international) {
             const bool rosterQuestion = asksAboutBots (engfuncs.pfnCmd_Args ());
             const auto containsWord = [&words] (const char *word) {
                const size_t length = std::strlen (word);
@@ -3200,7 +3217,7 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
                return false;
             };
             const bool genericAddress = containsWord ("bot") || containsWord ("bots");
-            const bool openConversation = question || asksForResponse (engfuncs.pfnCmd_Args ())
+            const bool openConversation = international || question || asksForResponse (engfuncs.pfnCmd_Args ())
                || startsWithGreeting (engfuncs.pfnCmd_Args ())
                || (cv_ai_bridge && aiBridgeReady () && isConversationalStatement (words));
             for (const auto &bot : bots) {

@@ -46,7 +46,8 @@ inline bool startsWithGreeting (const char *raw) {
    char words[97] {};
    bool question = false;
    if (!normalizeTeamPhrase (raw, words, question)) return false;
-   const char *greetings[] = { "hello", "hey", "hi", "yo", "kamusta", "kumusta", "musta", "uy" };
+   const char *greetings[] = { "hello", "hey", "hi", "yo", "kamusta", "kumusta", "musta", "uy",
+      "hola", "bonjour", "salut", "hallo", "ciao", "ola", "namaste", "privet", "nihao", "konnichiwa" };
    for (const auto *greeting : greetings) {
       const size_t length = std::strlen (greeting);
       if (std::strncmp (words, greeting, length) == 0

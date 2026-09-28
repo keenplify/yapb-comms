@@ -416,7 +416,9 @@ void Bot::checkForChat () {
 }
 
 static void normalizeBotChat (String &line) {
-   line.lowercase ();
+   for (auto &ch : line) {
+      if (ch >= 'A' && ch <= 'Z') ch = static_cast <char> (ch + ('a' - 'A'));
+   }
    for (int i = static_cast <int> (line.length ()) - 1; i >= 0; --i) {
       if (line[i] == '.') line.erase (i, 1);
    }

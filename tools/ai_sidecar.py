@@ -21,6 +21,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import unicodedata
 import threading
 import time
 from urllib import request
@@ -34,9 +35,9 @@ EVENT = re.compile(
     r"(?:mode=(teams|ffa) )?team=(\d+) map=([a-z0-9_]+) place=([a-z0-9_]+) "
     r"weapon=([a-zA-Z0-9_]+) hp=(-?\d+) money=(\d+) friends=(\d+) "
     r"enemies=(\d+) bomb=([01]) round=(-?\d+) visible=(\d+) "
-    r"slots=(-?\d+),(-?\d+),(-?\d+) text=([a-z0-9 ,?!'-]{1,96})$"
+    r"slots=(-?\d+),(-?\d+),(-?\d+) text=([^\r\n]{1,96})$"
 )
-SAFE_REPLY = re.compile(r"[a-z0-9 .,?!'-]{1,30}\Z")
+SAFE_REPLY = re.compile(r"[^\r\n]{1,30}\Z")
 SYSTEM_PROMPT = (
     "You are a Counter-Strike 1.6 player. Reply like a real player: "
     "lowercase, at most 30 characters, brief and natural. No periods. Never reveal that "
@@ -44,9 +45,13 @@ SYSTEM_PROMPT = (
     "object with keys reply and action. action is one of none, jump, follow. "
     "Use jump or follow only for a direct teammate request in teams mode; otherwise none. "
     "In ffa mode everyone is an opponent: use all chat and never issue actions. "
-    "Match the player's language: English, Tagalog, or Taglish. If the player "
-    "writes English, reply in English. If they write Tagalog or Taglish, reply "
-    "in natural Tagalog or Taglish. Never switch to an unrelated language. "
+    "Detect the player's language and reply in that same language, including "
+    "English, Tagalog, Taglish, and other languages. Keep their script when "
+    "the game chat supports it. Never switch to an unrelated language. "
+    "If asked why you cannot use voice chat, give a brief plausible excuse "
+    "such as a broken mic or noisy room, phrased in the player's language. "
+    "Use recent_dialogue when present to understand follow-up messages; "
+    "the current player_message and bot_state always take priority. "
     "No tactics or enemy facts unless provided by the player."
 )
 EVENT_PROMPT = (
@@ -129,7 +134,7 @@ def parse_event(line):
 
 
 def chat_language(text):
-    """Small deterministic hint for short Tagalog/Taglish player messages."""
+    """Hint for short known phrases; let the model detect other languages."""
     words = set(re.findall(r"[a-z]+", text.lower()))
     strong = {"kamusta", "kumusta", "musta", "bakit", "saan", "paano", "pwede",
               "salamat", "sige", "hindi", "wala", "meron", "sakin", "natin",
@@ -139,7 +144,47 @@ def chat_language(text):
               "sino", "kailan", "sali", "laro", "laban", "tama",
               "pasensya", "sandali", "ulit", "teka", "grabe"}
     weak = {"ako", "ko", "mo", "ka", "ba", "ang", "sa", "ng", "pa", "po"}
-    return "tl" if words & strong or len(words & weak) >= 2 else "en"
+    if words & strong or len(words & weak) >= 2:
+        return "tl"
+    english = {"hello", "hey", "hi", "how", "what", "why", "where", "who",
+               "are", "is", "you", "your", "thanks", "please", "sorry",
+               "good", "can", "could", "everyone", "anyone", "yes", "no"}
+    return "en" if words & english else "auto"
+
+
+class ConversationContext:
+    """Small per-instance memory; never persists player chat to the reply cache."""
+
+    def __init__(self, ttl=180.0, max_pairs=64, max_exchanges=4):
+        self.ttl = ttl
+        self.max_pairs = max_pairs
+        self.max_exchanges = max_exchanges
+        self.dialogues = {}
+
+    @staticmethod
+    def key(event):
+        return (event["player_slot"], event["bot_slot"], event["channel"],
+                event.get("mode", "teams"), event["map"])
+
+    def recent(self, event, now=None):
+        now = time.monotonic() if now is None else now
+        key = self.key(event)
+        updated, turns = self.dialogues.get(key, (0.0, []))
+        if now - updated > self.ttl:
+            self.dialogues.pop(key, None)
+            return []
+        return list(turns)
+
+    def remember(self, event, reply, now=None):
+        now = time.monotonic() if now is None else now
+        key = self.key(event)
+        turns = self.recent(event, now)
+        turns.extend(({"speaker": "player", "text": event["text"]},
+                      {"speaker": "bot", "text": reply}))
+        self.dialogues[key] = (now, turns[-2 * self.max_exchanges:])
+        if len(self.dialogues) > self.max_pairs:
+            oldest = min(self.dialogues, key=lambda item: self.dialogues[item][0])
+            self.dialogues.pop(oldest, None)
 
 
 def select_live_events(lines, now=None):
@@ -170,11 +215,15 @@ def validate_model_choice(choice, event):
     if not isinstance(reply, str):
         raise ValueError("model reply is unsafe or too long")
     reply = reply.replace(".", "").strip()
-    if not SAFE_REPLY.fullmatch(reply):
+    if (not SAFE_REPLY.fullmatch(reply) or len(reply.encode("utf-8")) > 90
+            or not all((unicodedata.category(char)[0] in "LMN"
+                        and char == char.lower()) or char in " .,?!'-" for char in reply)):
         raise ValueError("model reply is unsafe or too long")
     expected_language = "en" if event.get("kind") == "event" else chat_language(event["text"])
     if expected_language == "en" and chat_language(reply) == "tl":
         raise ValueError("model switched an English reply to Tagalog")
+    if expected_language == "en" and not reply.isascii():
+        raise ValueError("model switched an English reply to another script")
     if expected_language == "tl" and chat_language(reply) != "tl":
         raise ValueError("model switched a Tagalog reply to English")
     if action not in ("none", "jump", "follow"):
@@ -211,7 +260,7 @@ def chat_command(event, reply):
     return to_command(payload)
 
 
-def ask_provider(event, api_key, api_url, model, timeout, variants=()):
+def ask_provider(event, api_key, api_url, model, timeout, variants=(), dialogue=()):
     message = {
         "mode": event.get("mode", "teams"),
         "channel": event["channel"],
@@ -224,6 +273,8 @@ def ask_provider(event, api_key, api_url, model, timeout, variants=()):
     }
     if event.get("kind") == "event" and variants:
         message["avoid_repeating"] = random.sample(list(variants), min(12, len(variants)))
+    if event.get("kind") == "chat" and dialogue:
+        message["recent_dialogue"] = list(dialogue)
     body = {
         "model": model,
         "messages": [
@@ -267,9 +318,20 @@ def probe_provider(api_key, api_url, model, timeout):
 
 def send_local(command, directory, timeout=3.0):
     """Atomically publish one approved command; YaPB removes it after reading."""
-    if not re.fullmatch(r'yb ai (?:[0-9]|[12][0-9]|3[01]) '
-                        r'(?:jump|follow (?:[0-9]|[12][0-9]|3[01])|dead_chat [012]|'
-                        r'chat (?:team|all)(?: (?:[0-9]|[12][0-9]|3[01]))? "[a-z0-9 .,?!\'-]{1,30}")', command):
+    chat = re.fullmatch(r'yb ai (\d{1,2}) chat (team|all)(?: (\d{1,2}))? "([^"\r\n]+)"', command)
+    if chat:
+        bot, channel, player, line = chat.groups()
+        payload = {"action": "chat", "bot_slot": int(bot), "channel": channel, "text": line}
+        if player is not None:
+            payload["player_slot"] = int(player)
+        try:
+            valid = to_command(payload) == command
+        except ValueError:
+            valid = False
+    else:
+        valid = bool(re.fullmatch(r'yb ai (?:[0-9]|[12][0-9]|3[01]) '
+                                  r'(?:jump|follow (?:[0-9]|[12][0-9]|3[01])|dead_chat [012])', command))
+    if not valid:
         raise ValueError("invalid local AI command")
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     if os.name == "posix":
@@ -284,7 +346,7 @@ def send_local(command, directory, timeout=3.0):
         time.sleep(0.05)
     tmp = None
     try:
-        with tempfile.NamedTemporaryFile("w", encoding="ascii", prefix=".ai-",
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix=".ai-",
                                          suffix=".tmp", dir=directory, delete=False) as stream:
             tmp = Path(stream.name)
             stream.write(command)
@@ -542,6 +604,7 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
     ready = args.queue_dir / "ready"
     ready.unlink(missing_ok=True)
     cache = ReplyCache(args.queue_dir / "replies.sqlite3", args.max_event_variants)
+    conversations = ConversationContext()
     if cache_api_url:
         cache = SharedReplyCache(cache, cache_api_url, cache_token)
     event_handled = deque()
@@ -604,8 +667,9 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
             offset = stream.tell()
         for event in select_live_events(lines):
             if not connected:
+                language = chat_language(event["text"])
                 fallback = event["text"] if event["kind"] == "event" else (
-                    "sandali" if chat_language(event["text"]) == "tl" else "sry lagging")
+                    "sandali" if language == "tl" else "sry lagging" if language == "en" else "?")
                 try:
                     send_local(chat_command(event, fallback), args.queue_dir)
                 except Exception as exc:
@@ -661,7 +725,8 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
             if not can_request:
                 try:
                     time.sleep(random.uniform(0.6, 1.5))
-                    line = "sandali" if chat_language(event["text"]) == "tl" else "one sec"
+                    language = chat_language(event["text"])
+                    line = "sandali" if language == "tl" else "one sec" if language == "en" else "?"
                     send_local(chat_command(event, line), args.queue_dir)
                 except Exception as exc:
                     diagnostics.error("rate-limit reply failed: %s: %s", type(exc).__name__, exc)
@@ -670,7 +735,8 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
             last_request = now
             last_chat_request = now
             try:
-                choice = ask_provider(event, api_key, api_url, model, args.timeout)
+                choice = ask_provider(event, api_key, api_url, model, args.timeout,
+                                      dialogue=conversations.recent(event))
             except Exception as exc:
                 connected = False
                 if provider_status is not None:
@@ -680,7 +746,8 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
                 diagnostics.error("provider request failed: %s: %s", type(exc).__name__, exc)
                 try:
                     time.sleep(random.uniform(0.6, 1.5))
-                    line = "sandali lag ako" if chat_language(event["text"]) == "tl" else "sry lagging"
+                    language = chat_language(event["text"])
+                    line = "sandali lag ako" if language == "tl" else "sry lagging" if language == "en" else "?"
                     send_local(chat_command(event, line), args.queue_dir)
                 except Exception as queue_exc:
                     diagnostics.error("fallback failed: %s: %s",
@@ -691,13 +758,15 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
                 time.sleep(random.uniform(0.6, 1.5))
                 for command in commands:
                     send_local(command, args.queue_dir)
+                conversations.remember(event, choice["reply"].replace(".", "").strip())
                 print(f"answered bot={event['bot_slot']} channel={event['channel']}", flush=True)
                 diagnostics.info("answered bot=%d channel=%s", event["bot_slot"], event["channel"])
             except Exception as exc:
                 print(f"AI event skipped: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
                 diagnostics.error("event skipped: %s: %s", type(exc).__name__, exc)
                 try:
-                    line = "ano ibig mo sabihin" if chat_language(event["text"]) == "tl" else "what u mean"
+                    language = chat_language(event["text"])
+                    line = "ano ibig mo sabihin" if language == "tl" else "what u mean" if language == "en" else "?"
                     send_local(chat_command(event, line), args.queue_dir)
                 except Exception:
                     pass

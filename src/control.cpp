@@ -466,11 +466,11 @@ int BotControl::cmdAi () {
          ++lineArg;
       }
       const auto line = arg <StringRef> (lineArg);
-      if (line.empty () || line.length () > 30) return BotCommandResult::BadFormat;
+      if (line.empty () || line.length () > 90) return BotCommandResult::BadFormat;
       for (const char *p = line.chars (); *p; ++p) {
          const bool safe = (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9')
             || *p == ' ' || *p == '.' || *p == ',' || *p == '?' || *p == '!'
-            || *p == '\'' || *p == '-';
+            || *p == '\'' || *p == '-' || static_cast <unsigned char> (*p) >= 128;
          if (!safe) return BotCommandResult::BadFormat;
       }
       bot->sendAddressedReply (line, channel == "team", true);
