@@ -7,7 +7,7 @@
 
 #include <yapb.h>
 
-ConVar cv_chat ("chat", "1", "Enables or disables bot chat functionality.");
+ConVar cv_chat ("chat", "0", "Enables or disables bot chat functionality.");
 ConVar cv_chat_percent ("chat_percent", "30", "Bot's chance to send random dead chat when killed.", true, 0.0f, 100.0f);
 
 BotChatManager::BotChatManager () {
@@ -422,12 +422,37 @@ void Bot::sendToChat (StringRef message, bool teamOnly) {
       return;
    }
 
+   String line { message };
+   line.lowercase ();
+
    // special handling for legacy games
    if (game.is (GameFlags::Legacy)) {
-      sendToChatLegacy (message, teamOnly);
+      sendToChatLegacy (line, teamOnly);
    }
    else {
-      issueCommand ("%s \"%s\"", teamOnly ? "say_team" : "say", message);
+      issueCommand ("%s \"%s\"", teamOnly ? "say_team" : "say", line);
+   }
+}
+
+void Bot::sendTeamCallout (StringRef message) {
+   sendAddressedReply (message, true);
+}
+
+void Bot::sendAddressedReply (StringRef message, bool teamOnly) {
+   // Purposeful messages work while the old random chat bank is disabled.
+   // All callers use fixed strings, never text copied from a player.
+   if (m_isCreature || message.empty () || game.is (GameFlags::FreeForAll)
+      || (m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())) {
+      return;
+   }
+   m_lastTacticalChatTime = game.time ();
+   String line { message };
+   line.lowercase ();
+   if (game.is (GameFlags::Legacy)) {
+      sendToChatLegacy (line, teamOnly);
+   }
+   else {
+      issueCommand ("%s \"%s\"", teamOnly ? "say_team" : "say", line);
    }
 }
 

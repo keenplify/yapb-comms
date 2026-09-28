@@ -1179,6 +1179,11 @@ void Game::slowFrame () {
 
    // maintain leaders selection upon round start
    bots.maintainLeaders ();
+   bots.maintainCaptains ();
+   bots.maintainEnemyCallouts ();
+   bots.maintainKillReactions ();
+   bots.maintainRoundChat ();
+   bots.maintainDropOffers ();
 
    // initialize light levels
    graph.initLightLevels ();

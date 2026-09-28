@@ -257,6 +257,7 @@ private:
    float m_timeDoorOpen {}; // time to next door open check
    float m_timeHitDoor {}; // specific time after hitting the door
    float m_lastChatTime {}; // time bot last chatted
+   float m_lastTacticalChatTime {}; // rate limit for purposeful bot messages
    float m_timeLogoSpray {}; // time bot last spray logo
    float m_knifeAttackTime {}; // time to rush with knife (at the beginning of the round)
    float m_duckDefuseCheckTime {}; // time to check for ducking for defuse
@@ -485,6 +486,7 @@ private:
    void instantChatter (int type) const;
    void update ();
    void runMovement ();
+   void tryBhop ();
    void checkSpawnConditions ();
    void buyStuff ();
    void checkMsgQueue ();
@@ -679,6 +681,19 @@ public:
    int m_buyState {}; // current count in buying
    int m_blindButton {}; // buttons bot press, when blind
    int m_radioOrder {}; // actual command
+   int m_commsStyle {}; // radio, chat, or both
+   int m_commsSequence {}; // alternates delivery for bots that use both
+   bool m_requestedJump {}; // one movement frame, from an approved order
+   float m_pendingDeathLineTime {}; // optional short dead-team reaction
+   float m_lastDefuseCalloutTime {}; // one cover request per defuse attempt
+   bool m_postPlantRepositioned {}; // far-side T routed toward planted site
+   float m_nextPostPlantRouteTime {}; // throttle retries after interrupted routes
+   float m_nextBhopBurstTime {}; // next optional burst window
+   float m_nextBhopKnifeSwitchTime {}; // throttle diagnostic knife draw
+   int m_bhopJumpsLeft {}; // bounded burst, never continuous
+   bool m_bhopWasGrounded { true };
+   bool m_bhopReleaseJump {}; // release jump while airborne
+   bool m_textOrder {}; // deterministic human team-chat order
    int m_prevGoalIndex {}; // holds destination goal node
    int m_chosenGoalIndex {}; // used for experience, same as above
    int m_lastDamageType {}; // stores last damage
@@ -764,6 +779,10 @@ public:
    void clearTasks ();
    void dropWeaponForUser (edict_t *user, bool discardC4);
    void sendToChat (StringRef message, bool teamOnly);
+   void sendTeamCallout (StringRef message);
+   void sendAddressedReply (StringRef message, bool teamOnly);
+   bool requestJump ();
+   bool declineOptionalOrder ();
    void sendToChatLegacy (StringRef message, bool teamOnly);
    void pushChatMessage (int type, bool isTeamSay = false);
    void pushRadioMessage (int message);

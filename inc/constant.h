@@ -154,6 +154,12 @@ CR_DECLARE_SCOPED_ENUM (BotCreateResult,
 )
 
 // radio messages
+CR_DECLARE_SCOPED_ENUM (CommsStyle,
+   RadioOnly = 0,
+   Both,
+   ChatOnly
+)
+
 CR_DECLARE_SCOPED_ENUM (Radio,
    CoverMe = 1,
    YouTakeThePoint = 2,

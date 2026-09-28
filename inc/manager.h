@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <team_order.h>
+
 // bot creation tab
 struct BotRequest {
    bool manual {};
@@ -15,6 +17,23 @@ struct BotRequest {
    int skin {};
    int personality {};
    String name {};
+};
+
+struct MapCallout {
+   String name {};
+   Vector position {};
+};
+
+struct TeamAlias {
+   String phrase {};
+   TeamOrder order { TeamOrder::None };
+};
+
+struct TeamOrderAck {
+   int team {};
+   int excludeSlot { -1 };
+   bool accepted {};
+   float due {};
 };
 
 // manager class
@@ -30,6 +49,46 @@ private:
    float m_quotaMaintainTime {}; // time to maintain bot quota
    float m_plantSearchUpdateTime {}; // time to update for searching planted bomb
    float m_lastChatTime {}; // global chat time timestamp
+   float m_lastAddressedReplyTime {}; // global direct-reply rate limit
+   float m_lastHumanTeamChat[kGameTeamNum] {};
+   bool m_humanCaptain[kGameTeamNum] {};
+   bool m_botCaptainCalled[kGameTeamNum] {};
+   int m_botCaptainIndex[kGameTeamNum] {};
+   float m_economyCallTime[kGameTeamNum] {};
+   bool m_economyCallSent[kGameTeamNum] {};
+   float m_nextCommsDebugTime {};
+   Vector m_debugBotOrigin[kGameMaxPlayers] {};
+   float m_debugBotMovedTime[kGameMaxPlayers] {};
+   float m_lastEnemyReportTime[kGameTeamNum][3] {};
+   float m_lastQueuedAckTime[kGameTeamNum] {};
+   Array <TeamOrderAck> m_pendingOrderAcks {};
+   float m_preRoundChatTime[kGameTeamNum] {};
+   float m_postRoundChatTime[kGameTeamNum] {};
+   bool m_preRoundChatSent[kGameTeamNum] {};
+   bool m_postRoundChatSent[kGameTeamNum] {};
+   float m_postPlantChatTime {};
+   bool m_postPlantChatSent {};
+   int m_roundKills[kGameMaxPlayers] {};
+   int m_pendingKillReaction[kGameMaxPlayers] {};
+   int m_killReactionTeam[kGameMaxPlayers] {};
+   float m_killReactionTime[kGameMaxPlayers] {};
+   int m_dropOfferPhase[kGameTeamNum] {};
+   int m_dropOfferRich[kGameTeamNum] {};
+   int m_dropOfferPoor[kGameTeamNum] {};
+   bool m_dropOfferInitiatedByPoor[kGameTeamNum] {};
+   float m_dropOfferTime[kGameTeamNum] {};
+   int m_humanDropBot[kGameTeamNum] {};
+   int m_humanDropPlayer[kGameTeamNum] {};
+   int m_humanDropWeapon[kGameTeamNum] {};
+   int m_humanDropPhase[kGameTeamNum] {};
+   float m_humanDropTime[kGameTeamNum] {};
+   float m_humanDropDeadline[kGameTeamNum] {};
+   bool m_humanDropBuyIssued[kGameTeamNum] {};
+   int m_roundChatNumber {};
+   String m_calloutMap {};
+   Array <MapCallout> m_callouts {};
+   Array <TeamAlias> m_teamAliases {};
+   bool m_teamAliasesLoaded {};
 
    int m_lastWinner {}; // the team who won previous round
    int m_lastDifficulty {}; // last bots difficulty
@@ -86,6 +145,13 @@ public:
    void maintainQuota ();
    void maintainAutoKill ();
    void maintainLeaders ();
+   void maintainCaptains ();
+   void maintainEnemyCallouts ();
+   void maintainRoundChat ();
+   void maintainKillReactions ();
+   void maintainDropOffers ();
+   void acknowledgeTeamOrder (int team, bool accepted);
+   void processTeamOrderAcks ();
    void maintainRoundRestart ();
    void initQuota ();
    void initRound ();
@@ -100,6 +166,10 @@ public:
    void initFilters ();
    void resetFilters ();
    void captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent);
+   void loadMapCallouts ();
+   bool findMapCallout (StringRef name, Vector &position);
+   void loadTeamAliases ();
+   TeamOrder parseTeamChatOrder (const char *raw);
    void notifyBombDefuse ();
    void execGameEntity (edict_t *ent);
    void forEach (ForEachBot handler);

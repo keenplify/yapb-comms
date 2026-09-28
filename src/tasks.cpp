@@ -1625,6 +1625,12 @@ void Bot::pickupItem_ () {
       m_aimFlags |= AimFlags::Entity;
 
       if (m_team == Team::CT && itemDistanceSq < cr::sqrf (80.0f)) {
+         if (m_lastDefuseCalloutTime + 12.0f < game.time ()) {
+            // A defuse is urgent and should not be lost behind a sighting.
+            m_lastTacticalChatTime = 0.0f;
+            sendTeamCallout ("Cover me.");
+            m_lastDefuseCalloutTime = game.time ();
+         }
          pushChatterMessage (Chatter::DefusingBomb);
 
          // notify team of defusing

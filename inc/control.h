@@ -103,6 +103,7 @@ private:
    int cmdCvars ();
    int cmdShowCustom ();
    int cmdExec ();
+   int cmdAi ();
    int cmdNode ();
    int cmdNodeOn ();
    int cmdNodeOff ();

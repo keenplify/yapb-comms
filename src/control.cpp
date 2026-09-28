@@ -356,6 +356,99 @@ int BotControl::cmdExec () {
    return BotCommandResult::Handled;
 }
 
+int BotControl::cmdAi () {
+   // The external model sees only this small action vocabulary. Keep the
+   // command on the server console; never give a model generic bot exec.
+   enum args { alias = 1, target, action, argument };
+   if (m_ent != game.getLocalEntity () || !hasArg (target) || !hasArg (action)) {
+      return BotCommandResult::BadFormat;
+   }
+   const auto targetText = arg <StringRef> (target);
+   if (targetText.empty () || targetText.length () > 2) return BotCommandResult::BadFormat;
+   for (const char *p = targetText.chars (); *p; ++p) {
+      if (*p < '0' || *p > '9') return BotCommandResult::BadFormat;
+   }
+   const int botSlot = targetText.as <int> ();
+   if (botSlot >= kGameMaxPlayers) return BotCommandResult::BadFormat;
+   auto bot = bots.findBotByIndex (botSlot);
+   if (!bot) {
+      msg ("AI action rejected: bot slot is unavailable.");
+      return BotCommandResult::Handled;
+   }
+   const auto intent = arg <StringRef> (action);
+   if (intent == "follow") {
+      if (!hasArg (argument) || !bot->m_isAlive) return BotCommandResult::BadFormat;
+      const auto task = bot->getCurrentTaskId ();
+      if (task == Task::PlantBomb || task == Task::DefuseBomb || bot->m_hasHostage) {
+         msg ("AI follow rejected: bot is busy with an objective.");
+         return BotCommandResult::Handled;
+      }
+      const auto playerText = arg <StringRef> (argument);
+      if (playerText.empty () || playerText.length () > 2) return BotCommandResult::BadFormat;
+      for (const char *p = playerText.chars (); *p; ++p) {
+         if (*p < '0' || *p > '9') return BotCommandResult::BadFormat;
+      }
+      const int playerSlot = playerText.as <int> ();
+      if (playerSlot >= kGameMaxPlayers) return BotCommandResult::BadFormat;
+      auto player = game.playerOfIndex (playerSlot);
+      if (!game.isPlayerEntity (player) || game.isFakeClientEntity (player)
+         || !game.isAliveEntity (player) || game.getRealPlayerTeam (player) != bot->m_team) {
+         msg ("AI action rejected: follow target is unavailable or not a living teammate.");
+         return BotCommandResult::Handled;
+      }
+      if (bot->declineOptionalOrder ()) {
+         msg ("AI follow declined by bot.");
+         return BotCommandResult::Handled;
+      }
+      bot->m_radioOrder = Radio::FollowMe;
+      bot->m_radioEntity = player;
+      bot->m_textOrder = true;
+      msg ("AI follow order queued.");
+   }
+   else if (intent == "jump") {
+      if (bot->declineOptionalOrder ()) {
+         msg ("AI jump declined by bot.");
+         return BotCommandResult::Handled;
+      }
+      if (!bot->requestJump ()) {
+         msg ("AI jump rejected: bot cannot jump now.");
+         return BotCommandResult::Handled;
+      }
+      msg ("AI jump queued.");
+   }
+   else if (intent == "dead_chat") {
+      if (bot->m_isAlive || bot->m_commsStyle == CommsStyle::RadioOnly) {
+         msg ("AI dead chat rejected: bot is alive or radio-only.");
+         return BotCommandResult::Handled;
+      }
+      constexpr const char *lines[] = { "My bad.", "Unlucky.", "You got this." };
+      const auto lineText = hasArg (argument) ? arg <StringRef> (argument) : StringRef ("0");
+      if (lineText.length () != 1 || lineText[0] < '0' || lineText[0] > '2') return BotCommandResult::BadFormat;
+      bot->sendTeamCallout (lines[lineText[0] - '0']);
+      msg ("AI dead chat requested for team.");
+   }
+   else if (intent == "chat") {
+      if (!hasArg (argument) || !hasArg (argument + 1)
+         || bot->m_commsStyle == CommsStyle::RadioOnly) return BotCommandResult::BadFormat;
+      const auto channel = arg <StringRef> (argument);
+      if (channel != "team" && channel != "all") return BotCommandResult::BadFormat;
+      const auto line = arg <StringRef> (argument + 1);
+      if (line.empty () || line.length () > 30) return BotCommandResult::BadFormat;
+      for (const char *p = line.chars (); *p; ++p) {
+         const bool safe = (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9')
+            || *p == ' ' || *p == '.' || *p == ',' || *p == '?' || *p == '!'
+            || *p == '\'' || *p == '-';
+         if (!safe) return BotCommandResult::BadFormat;
+      }
+      bot->sendAddressedReply (line, channel == "team");
+      msg ("AI chat requested.");
+   }
+   else {
+      return BotCommandResult::BadFormat;
+   }
+   return BotCommandResult::Handled;
+}
+
 int BotControl::cmdNode () {
    enum args { root, alias, cmd, cmd2 };
 
@@ -2303,6 +2396,13 @@ BotControl::BotControl () {
          "Executes a client command on bot entity.",
 
          &BotControl::cmdExec
+      },
+      {
+         "ai",
+         "ai [bot_slot] [follow player_slot|jump|dead_chat 0..2|chat team/all text]",
+         "Runs a restricted external bot intent from server console only.",
+
+         &BotControl::cmdAi
       }
    };
 

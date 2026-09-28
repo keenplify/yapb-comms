@@ -6,6 +6,20 @@
 //
 
 #include <yapb.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <sys/stat.h>
+#include <team_order.h>
+#include <chat_intent.h>
+#include <team_allocation.h>
+#include <cmath>
+
+ConVar cv_comms_debug ("comms_debug", "0", "Prints short captain and navigation diagnostics to the game console.", true, 0.0f, 1.0f);
+ConVar cv_round_chat ("round_chat", "1", "One short team-chat line near each round start and end.", true, 0.0f, 1.0f);
+ConVar cv_ai_bridge ("ai_bridge", "0", "Send addressed player chat to an external AI sidecar via the YaPB log.", true, 0.0f, 1.0f);
+constexpr float kCaptainSilenceSeconds = 12.0f;
 
 ConVar cv_autovacate ("autovacate", "1", "Kicks bots to automatically make room for human players.");
 ConVar cv_autovacate_keep_slots ("autovacate_keep_slots", "1", "How many slots the autovacate feature should keep for human players.", true, 1.0f, 8.0f);
@@ -304,6 +318,80 @@ void BotManager::frame () {
    for (const auto &bot : m_bots) {
       bot->frame ();
    }
+   processTeamOrderAcks ();
+   // A local sidecar drops one validated command at a time into this mailbox.
+   // Polling is bounded and never waits for the provider or a network socket.
+   static float nextAiPoll = 0.0f;
+   static bool aiQueueReady = false;
+   if (!cv_ai_bridge) {
+      aiQueueReady = false;
+   }
+   else if (game.time () >= nextAiPoll || game.time () < nextAiPoll - 2.0f) {
+      nextAiPoll = game.time () + 0.25f;
+      const auto queueDir = strings.joinPath (bstor.getRunningPath (), folders.data, "ai");
+      const auto commandPath = strings.joinPath (queueDir, "pending.cmd");
+      if (!aiQueueReady) {
+         File::makePath (queueDir.chars ());
+         std::remove (commandPath.chars ()); // discard commands from an earlier server run
+         aiQueueReady = true;
+      }
+      else {
+         struct stat info {};
+         if (stat (commandPath.chars (), &info) == 0) {
+            char line[128] {};
+            bool valid = info.st_size > 0 && info.st_size < static_cast <long> (sizeof (line))
+               && std::time (nullptr) >= info.st_mtime && std::time (nullptr) - info.st_mtime <= 15;
+            if (valid) {
+               if (auto *file = std::fopen (commandPath.chars (), "rb")) {
+                  valid = std::fgets (line, sizeof (line), file) != nullptr;
+                  std::fclose (file);
+               }
+               else valid = false;
+            }
+            std::remove (commandPath.chars ());
+            if (valid) {
+               // Whitelist the entire grammar before passing it to the existing
+               // server-console-only `yb ai` dispatcher. No newline/semicolon or
+               // arbitrary engine command can enter through this file.
+               const char *pos = line;
+               auto number = [&] () -> bool {
+                  const char *start = pos;
+                  int value = 0;
+                  while (*pos >= '0' && *pos <= '9' && pos - start < 2) value = value * 10 + (*pos++ - '0');
+                  return pos > start && !(*pos >= '0' && *pos <= '9') && value < kGameMaxPlayers;
+               };
+               bool safe = std::strncmp (pos, "yb ai ", 6) == 0;
+               if (safe) {
+                  pos += 6;
+                  safe = number () && *pos++ == ' ';
+               }
+               if (safe) {
+                  if (std::strcmp (pos, "jump") == 0) safe = true;
+                  else if (std::strncmp (pos, "dead_chat ", 10) == 0)
+                     safe = pos[10] >= '0' && pos[10] <= '2' && pos[11] == '\0';
+                  else if (std::strncmp (pos, "follow ", 7) == 0) {
+                     pos += 7;
+                     safe = number () && *pos == '\0';
+                  }
+                  else if (std::strncmp (pos, "chat team ", 10) == 0 || std::strncmp (pos, "chat all ", 9) == 0) {
+                     pos += pos[5] == 't' ? 10 : 9;
+                     safe = *pos++ == '"';
+                     const char *start = pos;
+                     while (safe && *pos && *pos != '"') {
+                        const char ch = *pos++;
+                        safe = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+                           || ch == ' ' || ch == '.' || ch == ',' || ch == '?' || ch == '!'
+                           || ch == '\'' || ch == '-';
+                     }
+                     safe = safe && pos > start && pos - start <= 30 && *pos++ == '"' && *pos == '\0';
+                  }
+                  else safe = false;
+               }
+               if (safe) game.serverCommand ("%s", line);
+            }
+         }
+      }
+   }
 }
 
 void BotManager::addbot (StringRef name, int difficulty, int personality, int team, int skin, bool manual) {
@@ -490,6 +578,506 @@ void BotManager::maintainLeaders () {
    }
 }
 
+void BotManager::acknowledgeTeamOrder (int team, bool accepted) {
+   if (team != Team::CT && team != Team::Terrorist) return;
+   TeamOrderAck ack {};
+   ack.team = team;
+   ack.accepted = accepted;
+   ack.due = cr::max (game.time (), m_lastQueuedAckTime[team]) + rg (0.65f, 1.4f);
+   m_lastQueuedAckTime[team] = ack.due;
+   if (m_pendingOrderAcks.length () < 32) m_pendingOrderAcks.push (ack);
+}
+
+void BotManager::processTeamOrderAcks () {
+   for (int i = 0; i < m_pendingOrderAcks.length <int> ();) {
+      const auto ack = m_pendingOrderAcks[i];
+      if (ack.due > game.time ()) {
+         ++i;
+         continue;
+      }
+      m_pendingOrderAcks.erase (i, 1);
+   // One teammate answers. Prefer a bot whose text cooldown has elapsed;
+   // radio-only bots can always use the standard radio response.
+   Bot *speaker = nullptr;
+   for (const auto &bot : bots) {
+      if (!bot->m_isAlive || bot->m_team != ack.team || bot->m_isCreature
+         || bot->m_index == ack.excludeSlot) continue;
+      if (!speaker) speaker = bot.get ();
+      if (bot->m_commsStyle != CommsStyle::RadioOnly
+         && bot->m_lastTacticalChatTime > 0.0f
+         && bot->m_lastTacticalChatTime + 10.0f > game.time ()) continue;
+      speaker = bot.get ();
+      break;
+   }
+   if (speaker) {
+      speaker->pushRadioMessage (ack.accepted ? Radio::RogerThat : Radio::Negative);
+   }
+   }
+}
+
+void BotManager::maintainCaptains () {
+   const bool debugTick = cv_comms_debug && game.time () >= m_nextCommsDebugTime;
+   if (debugTick) {
+      m_nextCommsDebugTime = game.time () + 5.0f;
+      for (int team = 0; team < kGameTeamNum; ++team) {
+         logger.message ("[YaPB comms] team=%d round=%.0f silent=%.0f human=%d called=%d planted=%d",
+            team, game.time () - gameState.getRoundStartTime (),
+            game.time () - m_lastHumanTeamChat[team], m_humanCaptain[team],
+            m_botCaptainCalled[team], gameState.isBombPlanted ());
+      }
+      int reported = 0;
+      bool speedReported = false;
+      for (const auto &bot : bots) {
+         if (!bot->m_isAlive || bot->m_isCreature || bot->m_index < 0 || bot->m_index >= kGameMaxPlayers) continue;
+         const int slot = bot->m_index;
+         const auto task = bot->getCurrentTaskId ();
+         if (!speedReported && bot->m_moveSpeed > 50.0f) {
+            logger.message ("[YaPB bhop] bot=%d speed=%.0f max=%.0f weapon=%d jumps=%d task=%d enemy=%d seen=%.0f sense=%d stuck=%d c4=%d",
+               slot, bot->pev->velocity.length2d (), bot->pev->maxspeed,
+               bot->m_currentWeapon, bot->m_bhopJumpsLeft, static_cast <int> (task),
+               !game.isNullEntity (bot->m_enemy), game.time () - bot->m_seeEnemyTime,
+               bot->m_states, bot->m_isStuck, bot->m_hasC4);
+            speedReported = true;
+         }
+         if (bot->pev->origin.distanceSq (m_debugBotOrigin[slot]) > cr::sqrf (64.0f)) {
+            m_debugBotOrigin[slot] = bot->pev->origin;
+            m_debugBotMovedTime[slot] = game.time ();
+         }
+         if (reported < 3 && game.time () - m_debugBotMovedTime[slot] > 5.0f
+            && bot->m_moveSpeed > 50.0f && task != Task::Camp && task != Task::Pause) {
+            logger.message ("[YaPB nav] bot=%d team=%d task=%d node=%d stuck=%d pos=(%.0f %.0f %.0f)",
+               slot, bot->m_team, static_cast <int> (task), bot->m_currentNodeIndex,
+               bot->m_isStuck, bot->pev->origin.x, bot->pev->origin.y, bot->pev->origin.z);
+            ++reported;
+         }
+      }
+   }
+   // Give the team its buy plan while the buy period is still useful. This
+   // reports the same economy flag that the normal bot purchase code uses.
+   if (game.mapIs (MapFlags::Demolition) && !game.is (GameFlags::FreeForAll)
+      && !gameState.isRoundOver () && !gameState.isBombPlanted ()) {
+      for (int team = 0; team < kGameTeamNum; ++team) {
+         if (m_economyCallSent[team] || m_humanCaptain[team]
+            || game.time () < m_economyCallTime[team]) continue;
+         if (game.time () > m_economyCallTime[team] + 4.0f) {
+            m_economyCallSent[team] = true;
+            continue;
+         }
+         Bot *captain = nullptr;
+         for (const auto &bot : bots) {
+            if (!bot->m_isAlive || bot->m_team != team || bot->m_isCreature
+               || (bot->m_lastTacticalChatTime > 0.0f
+                  && bot->m_lastTacticalChatTime + 10.0f > game.time ())) continue;
+            if (!captain || bot->pev->frags > captain->pev->frags) captain = bot.get ();
+         }
+         if (!captain) continue;
+         const char *line = m_teamData[team].positiveEco ? "buy" : "eco";
+         captain->sendTeamCallout (line);
+         m_botCaptainIndex[team] = captain->m_index;
+         m_economyCallSent[team] = true;
+         m_preRoundChatSent[team] = true;
+         if (cv_comms_debug) logger.message ("[YaPB comms] economy captain=%d team=%d line=%s",
+            captain->m_index, team, line);
+      }
+   }
+   if (!game.mapIs (MapFlags::Demolition) || game.is (GameFlags::FreeForAll)
+      || gameState.isRoundOver () || gameState.isBombPlanted ()
+      || game.time () < gameState.getRoundStartTime () + kCaptainSilenceSeconds) return;
+
+   for (int team = 0; team < kGameTeamNum; ++team) {
+      if (m_humanCaptain[team] || m_botCaptainCalled[team]
+         || game.time () < m_lastHumanTeamChat[team] + kCaptainSilenceSeconds) continue;
+
+      Vector sitePosition {};
+      if (!findMapCallout ("BombsiteB", sitePosition)) {
+         if (debugTick) logger.message ("[YaPB comms] team=%d no BombsiteB callout", team);
+         continue;
+      }
+      const int siteNode = graph.getNearest (sitePosition, 512.0f);
+      if (siteNode == kInvalidNodeIndex) {
+         if (debugTick) logger.message ("[YaPB comms] team=%d no B graph node", team);
+         continue;
+      }
+
+      Bot *captain = nullptr;
+      Bot *roundCaptain = nullptr;
+      int eligible = 0;
+      for (const auto &bot : bots) {
+         if (!bot->m_isAlive || bot->m_team != team || bot->m_isCreature) continue;
+         const auto task = bot->getCurrentTaskId ();
+         if (task == Task::PlantBomb || task == Task::DefuseBomb || bot->m_hasHostage) continue;
+         ++eligible;
+         if (!captain || bot->pev->frags > captain->pev->frags) captain = bot.get ();
+         if (bot->m_index == m_botCaptainIndex[team]) roundCaptain = bot.get ();
+      }
+      if (roundCaptain) captain = roundCaptain;
+      if (!captain || eligible < 2) {
+         if (debugTick) logger.message ("[YaPB comms] team=%d eligible=%d", team, eligible);
+         continue;
+      }
+      if (captain->m_lastTacticalChatTime > 0.0f
+         && captain->m_lastTacticalChatTime + 10.0f > game.time ()) {
+         if (debugTick) logger.message ("[YaPB comms] team=%d captain chat cooldown", team);
+         continue;
+      }
+
+      Vector midPosition {};
+      const int midNode = eligible == 5 && findMapCallout ("Middle", midPosition)
+         ? graph.getNearest (midPosition, 512.0f) : kInvalidNodeIndex;
+      const bool split = midNode != kInvalidNodeIndex;
+      int sentMid = 0;
+      int sentSite = 0;
+      for (const auto &bot : bots) {
+         if (!bot->m_isAlive || bot->m_team != team || bot->m_isCreature) continue;
+         const auto task = bot->getCurrentTaskId ();
+         if (task == Task::PlantBomb || task == Task::DefuseBomb || bot->m_hasHostage) continue;
+         const bool toMid = split && sentSite >= 3 && sentMid < 2;
+         const int node = toMid ? midNode : siteNode;
+         bot->m_targetEntity = nullptr;
+         bot->clearSearchNodes ();
+         bot->m_position = graph[node].origin;
+         if (!split) {
+            bot->m_pathType = FindPath::Fast;
+            bot->m_agressionLevel = 1.0f;
+            bot->m_fearLevel = 0.0f;
+         }
+         bot->startTask (Task::MoveToPosition, TaskPri::MoveToPosition, node, 0.0f, true);
+         if (toMid) ++sentMid;
+         else ++sentSite;
+      }
+      captain->sendTeamCallout (split ? "3 b, 2 mid" : "rush b");
+      m_botCaptainIndex[team] = captain->m_index;
+      if (cv_comms_debug) logger.message ("[YaPB comms] captain=%d team=%d plan=%s bots=%d",
+         captain->m_index, team, split ? "3B2mid" : "rushB", eligible);
+      m_botCaptainCalled[team] = true;
+      // Give teammates a human-paced reaction instead of an instant radio.
+      TeamOrderAck ack {};
+      ack.team = team;
+      ack.excludeSlot = captain->m_index;
+      ack.accepted = true;
+      ack.due = game.time () + rg (1.5f, 2.8f);
+      if (m_pendingOrderAcks.length () < 32) m_pendingOrderAcks.push (ack);
+   }
+}
+
+void BotManager::maintainEnemyCallouts () {
+   if (game.is (GameFlags::FreeForAll) || gameState.isRoundOver ()) return;
+
+   constexpr const char *places[3] = { "BombsiteA", "BombsiteB", "Middle" };
+   constexpr const char *labels[3] = { "A", "B", "mid" };
+   Vector placePositions[3] {};
+   bool placeReady[3] {};
+   for (int i = 0; i < 3; ++i) placeReady[i] = findMapCallout (places[i], placePositions[i]);
+
+   for (const auto &bot : bots) {
+      if (!bot->m_isAlive || bot->m_isCreature || !(bot->m_states & Sense::SeeingEnemy)
+         || game.isNullEntity (bot->m_enemy)
+         || (bot->m_lastTacticalChatTime > 0.0f
+            && bot->m_lastTacticalChatTime + 10.0f > game.time ())) continue;
+      const int team = bot->m_team;
+      if (team != Team::CT && team != Team::Terrorist) continue;
+      if (!game.isAliveEntity (bot->m_enemy)
+         || game.getRealPlayerTeam (bot->m_enemy) == team) continue;
+      const Vector enemyPosition = bot->m_enemy->v.origin;
+      int place = -1;
+      float nearestDistance = cr::sqrf (750.0f);
+      for (int i = 0; i < 3; ++i) {
+         if (!placeReady[i] || cr::abs (enemyPosition.z - placePositions[i].z) > 256.0f) continue;
+         const float distance = enemyPosition.distanceSq2d (placePositions[i]);
+         if (distance < nearestDistance) {
+            nearestDistance = distance;
+            place = i;
+         }
+      }
+      if (place < 0 || (m_lastEnemyReportTime[team][place] > 0.0f
+         && m_lastEnemyReportTime[team][place] + 12.0f > game.time ())) continue;
+
+      int count = 0;
+      for (const auto &client : util.getClients ()) {
+         if (!(client.flags & ClientFlags::Used) || client.ent == nullptr
+            || client.team2 == team || !game.isAliveEntity (client.ent)
+            || client.ent->v.origin.distanceSq2d (enemyPosition) > cr::sqrf (650.0f)) continue;
+         if (bot->isInViewCone (client.ent->v.origin)
+            && bot->seesEntity (client.ent->v.origin)) ++count;
+      }
+      if (count == 0) continue;
+      bot->sendTeamCallout (strings.format ("%d %s", count, labels[place]));
+      m_lastEnemyReportTime[team][place] = game.time ();
+      if (cv_comms_debug) logger.message ("[YaPB comms] sighting bot=%d team=%d count=%d place=%s",
+         bot->m_index, team, count, labels[place]);
+   }
+}
+
+void BotManager::maintainRoundChat () {
+   if (!cv_round_chat || game.is (GameFlags::FreeForAll)) return;
+   const bool roundOver = gameState.isRoundOver ();
+   if (!roundOver && gameState.isBombPlanted () && !m_postPlantChatSent) {
+      if (m_postPlantChatTime <= 0.0f) m_postPlantChatTime = game.time () + rg (1.0f, 2.5f);
+      if (game.time () >= m_postPlantChatTime) {
+         Bot *speaker = nullptr;
+         for (const auto &bot : bots) {
+            if (!bot->m_isAlive || bot->m_team != Team::Terrorist || bot->m_isCreature
+               || bot->m_commsStyle == CommsStyle::RadioOnly
+               || (bot->m_lastTacticalChatTime > 0.0f
+                  && bot->m_lastTacticalChatTime + 10.0f > game.time ())) continue;
+            if (!speaker || bot->pev->frags > speaker->pev->frags) speaker = bot.get ();
+         }
+         if (speaker) {
+            constexpr const char *lines[] = { "hold site pls", "play time", "watch flank" };
+            speaker->sendTeamCallout (lines[m_roundChatNumber % 3]);
+            m_postPlantChatSent = true;
+         }
+         else if (game.time () > m_postPlantChatTime + 6.0f) m_postPlantChatSent = true;
+      }
+   }
+   for (int team = 0; team < kGameTeamNum; ++team) {
+      bool &sent = roundOver ? m_postRoundChatSent[team] : m_preRoundChatSent[team];
+      const float due = roundOver ? m_postRoundChatTime[team] : m_preRoundChatTime[team];
+      if (sent || due <= 0.0f || game.time () < due) continue;
+      if (!roundOver && game.mapIs (MapFlags::Demolition)
+         && !m_economyCallSent[team] && !m_humanCaptain[team]) continue;
+      if (!roundOver && game.time () > gameState.getRoundStartTime () + 5.0f) {
+         sent = true;
+         continue;
+      }
+
+      Bot *speaker = nullptr;
+      int eligible = 0;
+      for (const auto &bot : bots) {
+         if (bot->m_team != team || bot->m_isCreature
+            || bot->m_commsStyle == CommsStyle::RadioOnly
+            || (!roundOver && !bot->m_isAlive)
+            || (bot->m_lastTacticalChatTime > 0.0f
+               && bot->m_lastTacticalChatTime + 10.0f > game.time ())) continue;
+         ++eligible;
+         if (rg (1, eligible) == 1) speaker = bot.get ();
+      }
+      if (!speaker) continue;
+      constexpr const char *preLines[] = { "gl team", "we got this", "play smart", "let's focus" };
+      constexpr const char *winLines[] = { "nice round", "good stuff", "clean", "well played" };
+      const int variation = (m_roundChatNumber + speaker->m_index) % 4;
+      const char *line = !roundOver ? preLines[variation]
+         : m_lastWinner == team ? winLines[variation] : "nt";
+      speaker->sendTeamCallout (line);
+      sent = true;
+      if (cv_comms_debug) logger.message ("[YaPB comms] phase=%s team=%d bot=%d line=%s",
+         roundOver ? "post" : "pre", team, speaker->m_index, line);
+   }
+}
+
+void BotManager::maintainKillReactions () {
+   if (game.is (GameFlags::FreeForAll)) return;
+   constexpr const char *lines[] = { "nice 2k", "yo 3k", "4k, go ace", "ace!!" };
+   for (int slot = 0; slot < kGameMaxPlayers; ++slot) {
+      const int kills = m_pendingKillReaction[slot];
+      if (kills < 2 || game.time () < m_killReactionTime[slot]) continue;
+      const int team = m_killReactionTeam[slot];
+      Bot *speaker = nullptr;
+      for (const auto &bot : bots) {
+         if (!bot->m_isAlive || bot->m_team != team || bot->m_isCreature
+            || bot->m_commsStyle == CommsStyle::RadioOnly || bot->m_index == slot
+            || (bot->m_lastTacticalChatTime > 0.0f
+               && bot->m_lastTacticalChatTime + 10.0f > game.time ())) continue;
+         if (!speaker || bot->pev->frags > speaker->pev->frags) speaker = bot.get ();
+      }
+      if (speaker) {
+         speaker->sendTeamCallout (lines[cr::min (kills, 5) - 2]);
+         m_pendingKillReaction[slot] = 0;
+      }
+      else if (game.time () > m_killReactionTime[slot] + 5.0f) m_pendingKillReaction[slot] = 0;
+   }
+}
+
+void BotManager::maintainDropOffers () {
+   if (game.is (GameFlags::FreeForAll) || gameState.isRoundOver ()
+      || gameState.isBombPlanted ()) return;
+   for (int team = 0; team < kGameTeamNum; ++team) {
+      if (m_humanDropPhase[team] != 0 && game.time () >= m_humanDropTime[team]) {
+         Bot *giver = findBotByIndex (m_humanDropBot[team]);
+         auto receiver = game.playerOfIndex (m_humanDropPlayer[team]);
+         const int weaponId = m_humanDropWeapon[team];
+         const auto weaponBit = cr::bit (weaponId);
+         if (m_humanDropPhase[team] == 3 && giver && giver->m_isAlive
+            && !(giver->pev->weapons & weaponBit)) {
+            const bool primary = (weaponBit & kPrimaryWeaponMask) != 0;
+            giver->m_buyState = primary ? BuyState::PrimaryWeapon : BuyState::SecondaryWeapon;
+            giver->m_buyingFinished = false;
+            giver->m_buyPending = false;
+            if (!primary && giver->m_inBuyZone) {
+               const auto &requested = conf.findWeaponById (weaponId);
+               const int buyTeam = game.mapIs (MapFlags::Assassination)
+                  ? requested.teamAS : requested.teamStandard;
+               const int replacementId = (buyTeam == team || buyTeam == 2)
+                  ? weaponId : team == Team::Terrorist ? Weapon::Glock18 : Weapon::USP;
+               const auto &replacement = conf.findWeaponById (replacementId);
+               const int selection = game.is (GameFlags::Legacy) ? replacement.buySelect
+                  : team == Team::Terrorist ? replacement.buySelectT : replacement.buySelectCT;
+               if (replacement.buyGroup > 0 && selection > 0
+                  && giver->m_moneyAmount >= replacement.price) {
+                  giver->issueCommand ("buy;menuselect %d", replacement.buyGroup);
+                  giver->issueCommand ("menuselect %d", selection);
+               }
+            }
+            m_humanDropPhase[team] = 0;
+         }
+         else if (!giver || !giver->m_isAlive || !giver->m_inBuyZone
+            || !game.isPlayerEntity (receiver) || !game.isAliveEntity (receiver)
+            || game.getRealPlayerTeam (receiver) != team
+            || giver->pev->origin.distanceSq (receiver->v.origin) > cr::sqrf (256.0f)
+            || !m_teamData[team].positiveEco || game.time () > m_humanDropDeadline[team]) {
+            m_humanDropPhase[team] = 0;
+         }
+         else if (m_humanDropPhase[team] == 1) {
+            if (giver->pev->weapons & weaponBit) m_humanDropPhase[team] = 2;
+            else if (!m_humanDropBuyIssued[team]) {
+               const auto &weapon = conf.findWeaponById (weaponId);
+               if (weapon.id != weaponId || weapon.buyGroup <= 0) {
+                  m_humanDropPhase[team] = 0;
+                  continue;
+               }
+               const int selection = game.is (GameFlags::Legacy) ? weapon.buySelect
+                  : team == Team::Terrorist ? weapon.buySelectT : weapon.buySelectCT;
+               if (selection <= 0) {
+                  m_humanDropPhase[team] = 0;
+                  continue;
+               }
+               giver->issueCommand ("buy;menuselect %d", weapon.buyGroup);
+               giver->issueCommand ("menuselect %d", selection);
+               m_humanDropBuyIssued[team] = true;
+               m_humanDropTime[team] = game.time () + 1.5f;
+            }
+            else m_humanDropPhase[team] = 0;
+         }
+         else if (m_humanDropPhase[team] == 2) {
+            if (!(giver->pev->weapons & weaponBit)) m_humanDropPhase[team] = 0;
+            else if (giver->m_currentWeapon != weaponId) {
+               giver->selectWeaponById (weaponId);
+               giver->m_nextBhopKnifeSwitchTime = game.time () + 2.0f;
+               m_humanDropTime[team] = game.time () + 0.3f;
+            }
+            else {
+               giver->dropCurrentWeapon ();
+               m_humanDropPhase[team] = 3;
+               m_humanDropTime[team] = game.time () + 0.5f;
+               if (cv_comms_debug) logger.message ("[YaPB comms] human drop weapon=%d giver=%d receiver=%d",
+                  weaponId, giver->m_index, m_humanDropPlayer[team]);
+            }
+         }
+         else m_humanDropTime[team] = game.time () + 0.5f;
+      }
+      if (game.time () > gameState.getRoundStartTime () + 14.0f) continue;
+      if (m_dropOfferPhase[team] >= 4 || game.time () < m_dropOfferTime[team]) continue;
+      if (m_dropOfferPhase[team] == 3) {
+         Bot *rich = findBotByIndex (m_dropOfferRich[team]);
+         if (!rich || !rich->m_isAlive || !rich->m_inBuyZone) {
+            m_dropOfferPhase[team] = 4;
+            continue;
+         }
+         if (!rich->hasPrimaryWeapon ()) {
+            rich->m_buyState = BuyState::PrimaryWeapon;
+            rich->m_buyingFinished = false;
+            rich->m_buyPending = false;
+            m_dropOfferPhase[team] = 4;
+         }
+         else if (game.time () > gameState.getRoundStartTime () + 12.0f) m_dropOfferPhase[team] = 4;
+         else m_dropOfferTime[team] = game.time () + 0.5f;
+         continue;
+      }
+      if (!m_teamData[team].positiveEco) {
+         m_dropOfferPhase[team] = 4;
+         continue;
+      }
+      if (m_dropOfferPhase[team] == 0) {
+         Bot *rich = nullptr;
+         Bot *poor = nullptr;
+         for (const auto &candidate : bots) {
+            if (!candidate->m_isAlive || candidate->m_team != team || candidate->m_isCreature
+               || !candidate->m_inBuyZone
+               || !game.isNullEntity (candidate->m_enemy)
+               || candidate->m_seeEnemyTime + 3.0f > game.time ()) continue;
+            if (candidate->m_moneyAmount >= 6000 && candidate->hasPrimaryWeapon ()
+               && !candidate->m_hasC4) {
+               for (const auto &teammate : bots) {
+                  if (teammate.get () == candidate.get () || !teammate->m_isAlive
+                     || teammate->m_team != team || teammate->m_isCreature
+                     || !teammate->m_inBuyZone
+                     || teammate->m_commsStyle == CommsStyle::RadioOnly
+                     || (teammate->m_lastTacticalChatTime > 0.0f
+                        && teammate->m_lastTacticalChatTime + 10.0f > game.time ())
+                     || !game.isNullEntity (teammate->m_enemy)
+                     || teammate->m_seeEnemyTime + 3.0f > game.time ()
+                     || teammate->hasPrimaryWeapon () || teammate->m_moneyAmount > 2000
+                     || teammate->pev->origin.distanceSq (candidate->pev->origin) > cr::sqrf (128.0f)) continue;
+                  rich = candidate.get ();
+                  poor = teammate.get ();
+                  break;
+               }
+            }
+            if (rich) break;
+         }
+         if (!rich) {
+            m_dropOfferTime[team] = game.time () + 1.0f;
+            continue;
+         }
+         const bool richCanChat = rich->m_commsStyle != CommsStyle::RadioOnly
+            && (rich->m_lastTacticalChatTime <= 0.0f
+               || rich->m_lastTacticalChatTime + 10.0f <= game.time ());
+         m_dropOfferInitiatedByPoor[team] = !richCanChat;
+         if (richCanChat) rich->sendTeamCallout ("anyone need a drop?");
+         else poor->sendTeamCallout ("can i get a drop?");
+         rich->m_nextBhopKnifeSwitchTime = game.time () + 4.0f;
+         m_dropOfferRich[team] = rich->m_index;
+         m_dropOfferPoor[team] = poor->m_index;
+         m_dropOfferPhase[team] = 1;
+         m_dropOfferTime[team] = game.time () + rg (1.2f, 2.2f);
+         continue;
+      }
+      Bot *rich = findBotByIndex (m_dropOfferRich[team]);
+      Bot *poor = findBotByIndex (m_dropOfferPoor[team]);
+      if (!rich || !poor || !rich->m_isAlive || !poor->m_isAlive
+         || rich->m_team != team || poor->m_team != team
+         || !rich->m_inBuyZone || !poor->m_inBuyZone
+         || !game.isNullEntity (rich->m_enemy) || !game.isNullEntity (poor->m_enemy)
+         || rich->pev->origin.distanceSq (poor->pev->origin) > cr::sqrf (160.0f)) {
+         m_dropOfferPhase[team] = 4;
+         continue;
+      }
+      if (m_dropOfferPhase[team] == 1) {
+         if (m_dropOfferInitiatedByPoor[team]) {
+            rich->pushRadioMessage (Radio::RogerThat);
+         }
+         else {
+            if (poor->m_lastTacticalChatTime > 0.0f
+               && poor->m_lastTacticalChatTime + 10.0f > game.time ()) {
+               m_dropOfferTime[team] = game.time () + 0.5f;
+               continue;
+            }
+            poor->sendTeamCallout ("can i get a drop?");
+         }
+         m_dropOfferPhase[team] = 2;
+         m_dropOfferTime[team] = game.time () + rg (0.6f, 1.2f);
+         continue;
+      }
+      if (!rich->hasPrimaryWeapon () || poor->hasPrimaryWeapon ()
+         || rich->m_moneyAmount < 4000) {
+         m_dropOfferPhase[team] = 4;
+         continue;
+      }
+      if (rich->m_currentWeapon < 0 || rich->m_currentWeapon >= 32
+         || !(cr::bit (rich->m_currentWeapon) & kPrimaryWeaponMask)) {
+         rich->selectBestWeapon ();
+         rich->m_nextBhopKnifeSwitchTime = game.time () + 2.0f;
+         m_dropOfferTime[team] = game.time () + 0.3f;
+         return;
+      }
+      rich->dropCurrentWeapon ();
+      m_dropOfferPhase[team] = 3;
+      m_dropOfferTime[team] = game.time () + 0.5f;
+      if (cv_comms_debug) logger.message ("[YaPB comms] drop giver=%d receiver=%d team=%d",
+         rich->m_index, poor->m_index, team);
+   }
+}
+
 void BotManager::maintainRoundRestart () {
    if (!cv_first_human_restart || !game.isDedicated ()) {
       return;
@@ -561,6 +1149,7 @@ void BotManager::maintainAutoKill () {
 void BotManager::reset () {
    m_plantSearchUpdateTime = 0.0f;
    m_lastChatTime = 0.0f;
+   m_lastAddressedReplyTime = 0.0f;
    m_bombSayStatus = BombPlantedSay::ChatSay | BombPlantedSay::Chatter;
 }
 
@@ -837,6 +1426,11 @@ bool BotManager::hasCustomCSDMSpawnEntities () {
 }
 
 void BotManager::setLastWinner (int winner) {
+   if (!gameState.isRoundOver ()) {
+      for (int team = 0; team < kGameTeamNum; ++team) {
+         m_postRoundChatTime[team] = game.time () + rg (1.0f, 2.0f);
+      }
+   }
    m_lastWinner = winner;
    gameState.setRoundOver (true);
 
@@ -1189,6 +1783,7 @@ Bot::Bot (edict_t *bot, int difficulty, int personality, int team, int skin) {
    m_forceRadio = false;
 
    m_index = clientIndex - 1;
+   m_commsStyle = m_index % 3;
    m_startAction = BotMsg::None;
    m_retryJoin = 0;
    m_moneyAmount = 0;
@@ -1409,6 +2004,21 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
    const auto killerTeam = game.getRealPlayerTeam (killer);
    const auto victimTeam = game.getRealPlayerTeam (victim);
 
+   if (game.isPlayerEntity (killer) && killer != victim
+      && (killerTeam == Team::CT || killerTeam == Team::Terrorist)
+      && (victimTeam == Team::CT || victimTeam == Team::Terrorist)
+      && killerTeam != victimTeam) {
+      const int slot = game.indexOfPlayer (killer);
+      if (slot >= 0 && slot < kGameMaxPlayers) {
+         const int kills = ++m_roundKills[slot];
+         if (kills >= 2) {
+            m_pendingKillReaction[slot] = kills;
+            m_killReactionTeam[slot] = killerTeam;
+            m_killReactionTime[slot] = game.time () + rg (1.2f, 2.4f);
+         }
+      }
+   }
+
    if (cv_radio_mode.as <int> () == 2) {
       // need to send congrats on well placed shot
       for (const auto &notify : bots) {
@@ -1463,6 +2073,9 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
       victimBot->spawned ();
 
       victimBot->m_isAlive = false;
+      if (victimBot->m_commsStyle != CommsStyle::RadioOnly && rg.chance (25)) {
+         victimBot->m_pendingDeathLineTime = game.time () + 0.7f;
+      }
    }
 
    // is this message about a bot who killed somebody?
@@ -1492,6 +2105,15 @@ void Bot::newRound () {
 
    // delete all allocated path nodes
    clearSearchNodes ();
+   m_pendingDeathLineTime = 0.0f;
+   m_lastDefuseCalloutTime = 0.0f;
+   m_postPlantRepositioned = false;
+   m_nextPostPlantRouteTime = 0.0f;
+   m_nextBhopBurstTime = game.time () + rg (4.0f, 8.0f);
+   m_nextBhopKnifeSwitchTime = 0.0f;
+   m_bhopJumpsLeft = 0;
+   m_bhopWasGrounded = true;
+   m_bhopReleaseJump = false;
 
    m_pathOrigin.clear ();
    m_destOrigin.clear ();
@@ -1515,6 +2137,8 @@ void Bot::newRound () {
    m_numFriendsLeft = 0;
    m_numEnemiesLeft = 0;
    m_oldButtons = pev->button;
+   m_oldButtons &= ~IN_JUMP;
+   pev->button &= ~IN_JUMP;
    m_rechoiceGoalCount = 0;
 
    for (auto &node : m_previousNodes) {
@@ -1709,6 +2333,7 @@ void Bot::newRound () {
 
    m_radioEntity = nullptr;
    m_radioOrder = 0;
+   m_textOrder = false;
    m_defendedBomb = false;
    m_defendHostage = false;
    m_headedTime = 0.0f;
@@ -1959,12 +2584,572 @@ void Bot::updateTeamJoin () {
    }
 }
 
+void BotManager::loadTeamAliases () {
+   if (m_teamAliasesLoaded) {
+      return;
+   }
+   m_teamAliasesLoaded = true;
+   m_teamAliases.clear ();
+   const auto path = strings.joinPath (bstor.getRunningPathVFS (), folders.config, "team_aliases.cfg");
+   MemFile file {};
+   if (!file.open (path)) {
+      return;
+   }
+   String line {};
+   while (m_teamAliases.length () < 256 && file.getLine (line)) {
+      line.trim ();
+      if (line.empty () || line.startsWith ("#")) {
+         continue;
+      }
+      auto fields = line.split ("=");
+      if (fields.length () != 2) {
+         continue;
+      }
+      fields[0].trim ();
+      fields[1].trim ();
+      const auto order = parseTeamOrder (fields[1].chars ());
+      char phrase[97] {};
+      bool question = false;
+      if (order == TeamOrder::None || !normalizeTeamPhrase (fields[0].chars (), phrase, question)) {
+         continue;
+      }
+      bool duplicate = false;
+      for (const auto &alias : m_teamAliases) {
+         if (alias.phrase == phrase) {
+            duplicate = true;
+            break;
+         }
+      }
+      if (!duplicate) {
+         TeamAlias alias {};
+         alias.phrase = phrase;
+         alias.order = order;
+         m_teamAliases.push (cr::move (alias));
+      }
+   }
+}
+
+TeamOrder BotManager::parseTeamChatOrder (const char *raw) {
+   const auto builtIn = parseTeamOrder (raw);
+   if (builtIn != TeamOrder::None) {
+      return builtIn;
+   }
+   loadTeamAliases ();
+   char phrase[97] {};
+   bool question = false;
+   if (!normalizeTeamPhrase (raw, phrase, question)) {
+      return TeamOrder::None;
+   }
+   if (std::strstr (phrase, "don t") || std::strstr (phrase, "dont")
+      || std::strncmp (phrase, "not ", 4) == 0 || std::strstr (phrase, " not ")
+      || std::strncmp (phrase, "no ", 3) == 0 || std::strstr (phrase, " no ")
+      || std::strstr (phrase, "never") || std::strstr (phrase, "should we")
+      || (question && std::strncmp (phrase, "can you ", 8) != 0
+         && std::strncmp (phrase, "could you ", 10) != 0
+         && std::strncmp (phrase, "can someone ", 12) != 0)) {
+      return TeamOrder::None;
+   }
+   for (const auto &alias : m_teamAliases) {
+      if (alias.phrase == phrase) {
+         return alias.order;
+      }
+   }
+   return TeamOrder::None;
+}
+
+void BotManager::loadMapCallouts () {
+   String map = game.getMapName ();
+   if (map == m_calloutMap) {
+      return;
+   }
+   m_calloutMap = map;
+   m_callouts.clear ();
+
+   for (const char *ch = map.chars (); *ch; ++ch) {
+      if (!((*ch >= 'a' && *ch <= 'z') || (*ch >= '0' && *ch <= '9') || *ch == '_')) {
+         return;
+      }
+   }
+   const auto path = strings.joinPath (bstor.getRunningPathVFS (), folders.config, "callouts", map + ".cfg");
+   MemFile file {};
+   if (!file.open (path)) {
+      return;
+   }
+   String line {};
+   bool sizeVerified = false;
+   while (file.getLine (line)) {
+      line.trim ();
+      if (line.empty () || line.startsWith ("#")) {
+         continue;
+      }
+      auto fields = line.split (" ");
+      if (!sizeVerified) {
+         if (fields.length () != 2 || fields[0] != "bsp_size" || fields[1].as <int> () != graph.getBspSize ()) {
+            m_callouts.clear ();
+            return;
+         }
+         sizeVerified = true;
+         continue;
+      }
+      if (fields.length () != 4 || fields[0].empty ()) {
+         continue;
+      }
+      MapCallout callout {};
+      callout.name = fields[0];
+      callout.position = Vector (fields[1].as <float> (), fields[2].as <float> (), fields[3].as <float> ());
+      if (!std::isfinite (callout.position.x) || !std::isfinite (callout.position.y) || !std::isfinite (callout.position.z)
+         || callout.position.x < -32768.0f || callout.position.x > 32768.0f
+         || callout.position.y < -32768.0f || callout.position.y > 32768.0f
+         || callout.position.z < -32768.0f || callout.position.z > 32768.0f) {
+         continue;
+      }
+      m_callouts.push (cr::move (callout));
+   }
+   if (!sizeVerified) {
+      m_callouts.clear ();
+   }
+}
+
+bool BotManager::findMapCallout (StringRef name, Vector &position) {
+   loadMapCallouts ();
+   for (const auto &callout : m_callouts) {
+      if (callout.name == name) {
+         position = callout.position;
+         return true;
+      }
+   }
+   return false;
+}
+
 void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
    if (game.isBotCmd ()) {
       return;
    }
 
+   if ((cmd == "say" || cmd == "say_team") && !game.isFakeClientEntity (ent)) {
+      const int speakerTeam = game.getRealPlayerTeam (ent);
+      if (speakerTeam == Team::CT || speakerTeam == Team::Terrorist) {
+         m_lastHumanTeamChat[speakerTeam] = game.time ();
+      }
+   }
+
+   if (cmd == "say_team" && !game.isFakeClientEntity (ent) && game.isAliveEntity (ent)) {
+      TeamAllocation allocation {};
+      if (parseTeamAllocation (engfuncs.pfnCmd_Args (), allocation)) {
+         const int team = game.getRealPlayerTeam (ent);
+         if (team != Team::CT && team != Team::Terrorist) return;
+         m_humanCaptain[team] = true;
+         const int counts[3] = { allocation.a, allocation.b, allocation.mid };
+         const char *places[3] = { "BombsiteA", "BombsiteB", "Middle" };
+         int nodes[3] = { kInvalidNodeIndex, kInvalidNodeIndex, kInvalidNodeIndex };
+         for (int i = 0; i < 3; ++i) {
+            if (counts[i] == 0) continue;
+            Vector position {};
+            if (!findMapCallout (places[i], position)
+               || (nodes[i] = graph.getNearest (position, 512.0f)) == kInvalidNodeIndex) {
+               game.clientPrint (ent, "YaPB: named route for this split is unavailable.");
+               acknowledgeTeamOrder (team, false);
+               return;
+            }
+         }
+         int available = 0;
+         for (const auto &bot : bots) {
+            const auto task = bot->getCurrentTaskId ();
+            if (bot->m_isAlive && bot->m_team == team && !bot->m_isCreature
+               && task != Task::PlantBomb && task != Task::DefuseBomb && !bot->m_hasHostage) ++available;
+         }
+         if (available < allocation.a + allocation.b + allocation.mid) {
+            game.clientPrint (ent, "YaPB: not enough available bots for that split.");
+            acknowledgeTeamOrder (team, false);
+            return;
+         }
+         bool assigned[kGameMaxPlayers] {};
+         for (int i = 0; i < 3; ++i) {
+            for (int sent = 0; sent < counts[i];) {
+               for (const auto &bot : bots) {
+                  const auto task = bot->getCurrentTaskId ();
+                  if (!bot->m_isAlive || bot->m_team != team || bot->m_isCreature
+                     || task == Task::PlantBomb || task == Task::DefuseBomb || bot->m_hasHostage
+                     || assigned[bot->m_index]) continue;
+                  assigned[bot->m_index] = true;
+                  bot->m_targetEntity = nullptr;
+                  bot->clearSearchNodes ();
+                  bot->m_position = graph[nodes[i]].origin;
+                  bot->startTask (Task::Camp, TaskPri::Camp, kInvalidNodeIndex, game.time () + 45.0f, true);
+                  bot->startTask (Task::MoveToPosition, TaskPri::MoveToPosition, nodes[i], 0.0f, true);
+                  ++sent;
+                  break;
+               }
+            }
+         }
+         game.clientPrint (ent, "YaPB: split queued for %d bot(s).", allocation.a + allocation.b + allocation.mid);
+         acknowledgeTeamOrder (team, true);
+         return;
+      }
+      const auto order = parseTeamChatOrder (engfuncs.pfnCmd_Args ());
+
+      if (order != TeamOrder::None) {
+         const int team = game.getRealPlayerTeam (ent);
+         if (team != Team::CT && team != Team::Terrorist) {
+            return;
+         }
+         m_humanCaptain[team] = true;
+         if (order == TeamOrder::DropWeapon) {
+            if (!m_teamData[team].positiveEco || m_humanDropPhase[team] != 0
+               || gameState.isBombPlanted ()) {
+               acknowledgeTeamOrder (team, false);
+               return;
+            }
+            const auto requestedName = parseRequestedDropWeapon (engfuncs.pfnCmd_Args ());
+            if (!requestedName) {
+               acknowledgeTeamOrder (team, false);
+               return;
+            }
+            const WeaponInfo *requested = nullptr;
+            for (const auto &weapon : conf.getWeapons ()) {
+               if (weapon.name == requestedName) {
+                  requested = &weapon;
+                  break;
+               }
+            }
+            if (!requested || requested->id <= 0 || requested->id >= 32) {
+               acknowledgeTeamOrder (team, false);
+               return;
+            }
+            Bot *giver = nullptr;
+            for (const auto &candidate : bots) {
+               if (!candidate->m_isAlive || candidate->m_team != team || candidate->m_isCreature
+                  || !candidate->m_inBuyZone || candidate->m_hasC4
+                  || candidate->pev->origin.distanceSq (ent->v.origin) > cr::sqrf (256.0f)) continue;
+               const bool ownsWeapon = (candidate->pev->weapons & cr::bit (requested->id)) != 0;
+               const int buyTeam = game.mapIs (MapFlags::Assassination)
+                  ? requested->teamAS : requested->teamStandard;
+               const bool canBuy = (buyTeam == team || buyTeam == 2)
+                  && !candidate->isWeaponRestricted (requested->id);
+               if (ownsWeapon) {
+                  if (candidate->m_moneyAmount < cr::max (4500, requested->price + 1500)) continue;
+               }
+               else if (!canBuy || candidate->m_moneyAmount < requested->price * 2 + 1500) continue;
+               if (!giver || candidate->m_moneyAmount > giver->m_moneyAmount) giver = candidate.get ();
+            }
+            if (!giver) {
+               acknowledgeTeamOrder (team, false);
+               return;
+            }
+            m_humanDropBot[team] = giver->m_index;
+            m_humanDropPlayer[team] = game.indexOfPlayer (ent);
+            m_humanDropWeapon[team] = requested->id;
+            m_humanDropPhase[team] = 1;
+            m_humanDropTime[team] = game.time () + rg (0.7f, 1.3f);
+            m_humanDropDeadline[team] = game.time () + 7.0f;
+            m_humanDropBuyIssued[team] = false;
+            m_dropOfferPhase[team] = 4;
+            giver->m_nextBhopKnifeSwitchTime = game.time () + 7.0f;
+            acknowledgeTeamOrder (team, true);
+            return;
+         }
+         if (order == TeamOrder::Jump) {
+            Bot *nearest = nullptr;
+            float distance = cr::sqrf (512.0f);
+            for (const auto &candidate : bots) {
+               if (!candidate->m_isAlive || candidate->m_team != team || candidate->m_isCreature) continue;
+               const float current = candidate->pev->origin.distanceSq (ent->v.origin);
+               if (current < distance) {
+                  nearest = candidate.get ();
+                  distance = current;
+               }
+            }
+            if (nearest && nearest->declineOptionalOrder ()) {
+               game.clientPrint (ent, "YaPB: bot declined the jump.");
+               acknowledgeTeamOrder (team, false);
+            }
+            else if (nearest && nearest->requestJump ()) {
+               game.clientPrint (ent, "YaPB: jump queued.");
+               acknowledgeTeamOrder (team, true);
+            }
+            else {
+               game.clientPrint (ent, "YaPB: no nearby bot can jump now.");
+               acknowledgeTeamOrder (team, false);
+            }
+            return;
+         }
+         int issued = 0;
+         int declined = 0;
+         bool needsCallouts = false;
+         bool needsFeature = false;
+         const char *routeName = nullptr;
+         const char *fallbackRouteName = nullptr;
+         bool watchRoute = false;
+         switch (order) {
+         case TeamOrder::RotateA: case TeamOrder::GoA: case TeamOrder::LeaveB:
+         case TeamOrder::AllA: case TeamOrder::RushA:
+            routeName = "BombsiteA";
+            break;
+         case TeamOrder::RotateB: case TeamOrder::GoB: case TeamOrder::LeaveA:
+         case TeamOrder::AllB: case TeamOrder::RushB:
+            routeName = "BombsiteB";
+            break;
+         case TeamOrder::AllMid: case TeamOrder::RushMid:
+            routeName = "Middle";
+            break;
+         case TeamOrder::WatchMid:
+            routeName = "Middle";
+            watchRoute = true;
+            break;
+         case TeamOrder::WatchApps:
+            routeName = "Apartments";
+            fallbackRouteName = "Apartment";
+            watchRoute = true;
+            break;
+         case TeamOrder::WatchBack:
+            routeName = "Back";
+            watchRoute = true;
+            break;
+         default:
+            break;
+         }
+         Vector routePosition {};
+         bool routeReady = routeName != nullptr && findMapCallout (routeName, routePosition);
+         if (!routeReady && fallbackRouteName != nullptr) {
+            routeReady = findMapCallout (fallbackRouteName, routePosition);
+         }
+         int routeNode = routeReady ? graph.getNearest (routePosition, 512.0f) : kInvalidNodeIndex;
+
+         for (const auto &bot : bots) {
+            if (!bot->m_isAlive || bot->m_team != team || bot->m_isCreature) {
+               continue;
+            }
+            const auto task = bot->getCurrentTaskId ();
+            const bool busy = task == Task::PlantBomb || task == Task::DefuseBomb || bot->m_hasHostage;
+            if (busy) {
+               continue;
+            }
+            if (order == TeamOrder::FollowMe || order == TeamOrder::Trade
+               || order == TeamOrder::Push || order == TeamOrder::Rush || order == TeamOrder::Swing) {
+               if (bot->declineOptionalOrder ()) {
+                  ++declined;
+                  continue;
+               }
+            }
+
+            int radio = 0;
+            switch (order) {
+            case TeamOrder::FollowMe:
+            case TeamOrder::Trade:
+               if (!game.isNullEntity (bot->m_enemy)) {
+                  continue;
+               }
+               bot->m_targetEntity = nullptr;
+               radio = Radio::FollowMe;
+               break;
+            case TeamOrder::Push:
+            case TeamOrder::Rush:
+            case TeamOrder::Execute:
+            case TeamOrder::Swing:
+               radio = Radio::StormTheFront;
+               break;
+            case TeamOrder::PlaySafe:
+            case TeamOrder::Hold:
+               bot->m_targetEntity = nullptr;
+               bot->m_fearLevel = 1.0f;
+               bot->m_agressionLevel = 0.0f;
+               bot->clearSearchNodes ();
+               bot->startTask (Task::Pause, TaskPri::Pause, kInvalidNodeIndex, game.time () + 15.0f, true);
+               ++issued;
+               continue;
+            case TeamOrder::HoldForMe:
+               radio = Radio::GetInPositionAndWaitForGo;
+               break;
+            case TeamOrder::Retake:
+            case TeamOrder::Rotate:
+               if (team == Team::CT && gameState.isBombPlanted () && !gameState.getBombOrigin ().empty ()) {
+                  bot->m_targetEntity = nullptr;
+                  bot->m_position = gameState.getBombOrigin ();
+                  bot->clearSearchNodes ();
+                  bot->startTask (Task::MoveToPosition, TaskPri::MoveToPosition, kInvalidNodeIndex, 0.0f, true);
+                  ++issued;
+               }
+               else {
+                  needsFeature = true;
+               }
+               continue;
+            case TeamOrder::Eco:
+            case TeamOrder::Save:
+               if (bot->m_inBuyZone && !gameState.isBombPlanted ()) {
+                  m_teamData[team].positiveEco = false;
+                  bot->m_buyState = BuyState::Done;
+                  bot->m_buyingFinished = true;
+                  ++issued;
+               }
+               else {
+                  needsFeature = true;
+               }
+               continue;
+            case TeamOrder::Force:
+            case TeamOrder::FullBuy:
+               if (bot->m_inBuyZone && !gameState.isBombPlanted ()) {
+                  m_teamData[team].positiveEco = true;
+                  bot->m_buyState = BuyState::PrimaryWeapon;
+                  bot->m_buyingFinished = false;
+                  bot->m_buyPending = false;
+                  ++issued;
+               }
+               else {
+                  needsFeature = true;
+               }
+               continue;
+            case TeamOrder::Drop:
+               if (issued == 0 && bot->m_currentWeapon >= 0 && bot->m_currentWeapon < 32
+                  && bot->pev->origin.distanceSq (ent->v.origin) < cr::sqrf (256.0f)
+                  && (cr::bit (bot->m_currentWeapon) & kPrimaryWeaponMask)) {
+                  bot->dropCurrentWeapon ();
+                  ++issued;
+               }
+               else {
+                  needsFeature = true;
+               }
+               continue;
+            case TeamOrder::RotateA: case TeamOrder::RotateB:
+            case TeamOrder::GoA: case TeamOrder::GoB:
+            case TeamOrder::LeaveA: case TeamOrder::LeaveB:
+            case TeamOrder::AllA: case TeamOrder::AllB: case TeamOrder::AllMid:
+            case TeamOrder::RushA: case TeamOrder::RushB: case TeamOrder::RushMid:
+            case TeamOrder::WatchMid: case TeamOrder::WatchApps: case TeamOrder::WatchBack:
+               if (routeNode == kInvalidNodeIndex) {
+                  needsCallouts = true;
+                  continue;
+               }
+               bot->m_targetEntity = nullptr;
+               bot->clearSearchNodes ();
+               if (order == TeamOrder::RushA || order == TeamOrder::RushB || order == TeamOrder::RushMid) {
+                  bot->m_pathType = FindPath::Fast;
+                  bot->m_agressionLevel = 1.0f;
+                  bot->m_fearLevel = 0.0f;
+               }
+               bot->m_position = graph[routeNode].origin;
+               if (watchRoute) {
+                  bot->startTask (Task::Camp, TaskPri::Camp, kInvalidNodeIndex, game.time () + 45.0f, true);
+               }
+               bot->startTask (Task::MoveToPosition, TaskPri::MoveToPosition, routeNode, 0.0f, true);
+               ++issued;
+               continue;
+            default:
+               needsFeature = true;
+               continue;
+            }
+            if (radio != 0) {
+               bot->m_radioOrder = radio;
+               bot->m_radioEntity = ent;
+               bot->m_textOrder = true;
+               ++issued;
+            }
+         }
+         if (issued > 0) {
+            game.clientPrint (ent, "YaPB: order queued for %d bot(s).", issued);
+         }
+         else if (needsCallouts) {
+            game.clientPrint (ent, "YaPB: this map has no named callout routes yet.");
+         }
+         else if (needsFeature) {
+            game.clientPrint (ent, "YaPB: I cannot perform that command yet.");
+         }
+         else if (declined > 0) {
+            game.clientPrint (ent, "YaPB: bot(s) declined the request.");
+         }
+         else {
+            game.clientPrint (ent, "YaPB: no available teammate bots.");
+         }
+         acknowledgeTeamOrder (team, issued > 0);
+         return;
+      }
+   }
+
    if (cmd.startsWith ("say")) {
+      // Addressed replies preserve the player's channel. Orders above are
+      // deliberately restricted to say_team and never enter this path.
+      if (!game.isFakeClientEntity (ent) && (cmd == "say" || cmd == "say_team")
+         && (m_lastAddressedReplyTime <= 0.0f || m_lastAddressedReplyTime + 8.0f < game.time ())) {
+         char words[97] {};
+         bool question = false;
+         if (normalizeTeamPhrase (engfuncs.pfnCmd_Args (), words, question)) {
+            const bool rosterQuestion = asksAboutBots (engfuncs.pfnCmd_Args ());
+            const auto containsWord = [&words] (const char *word) {
+               const size_t length = std::strlen (word);
+               for (const char *at = words; (at = std::strstr (at, word)) != nullptr; ++at) {
+                  if ((at == words || at[-1] == ' ') && (at[length] == '\0' || at[length] == ' ')) {
+                     return true;
+                  }
+               }
+               return false;
+            };
+            const bool genericAddress = containsWord ("bot") || containsWord ("bots");
+            for (const auto &bot : bots) {
+               if (bot->m_isCreature || bot->m_commsStyle == CommsStyle::RadioOnly
+                  || bot->m_isAlive != game.isAliveEntity (ent)
+                  || (bot->m_lastTacticalChatTime > 0.0f && bot->m_lastTacticalChatTime + 10.0f > game.time ())
+                  || (cmd == "say_team" && bot->m_team != game.getRealPlayerTeam (ent))) {
+                  continue;
+               }
+               char botName[97] {};
+               bool unused = false;
+               const bool named = normalizeTeamPhrase (bot->pev->netname.chars (), botName, unused)
+                  && std::strlen (botName) >= 3 && containsWord (botName);
+               if (!rosterQuestion && !genericAddress && !named) {
+                  continue;
+               }
+               if (cv_ai_bridge) {
+                  // Send a bounded snapshot of information this bot can know.
+                  // Player text is normalized before it reaches the log.
+                  loadMapCallouts ();
+                  String place = "unknown";
+                  float placeDistance = cr::sqrf (1000.0f);
+                  for (const auto &callout : m_callouts) {
+                     if (cr::abs (callout.position.z - bot->pev->origin.z) > 256.0f) continue;
+                     const float distance = callout.position.distanceSq2d (bot->pev->origin);
+                     if (distance < placeDistance) {
+                        place = callout.name;
+                        placeDistance = distance;
+                     }
+                  }
+                  place.lowercase ();
+                  int visible[3] { -1, -1, -1 };
+                  int visibleCount = 0;
+                  for (const auto &client : util.getClients ()) {
+                     if (!(client.flags & ClientFlags::Used) || client.ent == nullptr
+                        || client.team2 == bot->m_team || !game.isAliveEntity (client.ent)
+                        || !bot->isInViewCone (client.ent->v.origin)
+                        || !bot->seesEntity (client.ent->v.origin)) continue;
+                     if (visibleCount < 3) visible[visibleCount] = game.indexOfPlayer (client.ent);
+                     ++visibleCount;
+                  }
+                  StringRef weapon = "unknown";
+                  for (const auto &info : conf.getWeapons ()) {
+                     if (info.id == bot->m_currentWeapon) {
+                        weapon = info.name;
+                        break;
+                     }
+                  }
+                  logger.message ("[YaPB ai] chat bot=%d player=%d channel=%s team=%d map=%s place=%s weapon=%s hp=%d money=%d friends=%d enemies=%d bomb=%d round=%.0f visible=%d slots=%d,%d,%d text=%s",
+                     bot->m_index, game.indexOfPlayer (ent), cmd == "say_team" ? "team" : "all",
+                     game.getRealPlayerTeam (ent), game.getMapName (), place.chars (), weapon.chars (),
+                     static_cast <int> (bot->pev->health), bot->m_moneyAmount,
+                     bot->m_numFriendsLeft, bot->m_numEnemiesLeft, gameState.isBombPlanted (),
+                     game.time () - gameState.getRoundStartTime (), visibleCount,
+                     visible[0], visible[1], visible[2], words);
+               }
+               else if (rosterQuestion) {
+                  constexpr const char *replies[] = { "Maybe.", "You tell me.", "Could be. Why?" };
+                  const int variation = (bot->m_index + static_cast <int> (game.time () / 30.0f)) % 3;
+                  bot->sendAddressedReply (replies[variation], cmd == "say_team");
+               }
+               else {
+                  bot->sendAddressedReply (cmd == "say_team" ? "Yeah?" : "What's up?", cmd == "say_team");
+               }
+               m_lastAddressedReplyTime = game.time ();
+               break;
+            }
+         }
+      }
       const bool alive = game.isAliveEntity (ent);
       int team = -1;
 
@@ -1997,6 +3182,11 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
 
       if (radioCommand != 0) {
          radioCommand += 10 * (target.radio - 1);
+
+         if (!game.isFakeClientEntity (ent) && (target.team == Team::CT || target.team == Team::Terrorist)) {
+            m_humanCaptain[target.team] = true;
+            m_lastHumanTeamChat[target.team] = game.time ();
+         }
 
          if (radioCommand != Radio::RogerThat && radioCommand != Radio::Negative && radioCommand != Radio::ReportingIn) {
             for (const auto &bot : bots) {
@@ -2152,6 +3342,44 @@ void BotManager::initRound () {
       selectLeaders (team, true);
 
       m_teamData[team].lastRadioTimestamp = 0.0f;
+      m_lastHumanTeamChat[team] = game.time ();
+      m_humanCaptain[team] = false;
+      m_botCaptainCalled[team] = false;
+      m_botCaptainIndex[team] = -1;
+      m_economyCallTime[team] = game.time () + rg (1.5f, 2.5f);
+      m_economyCallSent[team] = false;
+      for (int place = 0; place < 3; ++place) m_lastEnemyReportTime[team][place] = 0.0f;
+      m_lastQueuedAckTime[team] = 0.0f;
+      m_preRoundChatTime[team] = game.time () + rg (1.5f, 3.0f);
+      m_postRoundChatTime[team] = 0.0f;
+      m_preRoundChatSent[team] = false;
+      m_postRoundChatSent[team] = false;
+      m_dropOfferPhase[team] = 0;
+      m_dropOfferRich[team] = -1;
+      m_dropOfferPoor[team] = -1;
+      m_dropOfferInitiatedByPoor[team] = false;
+      m_dropOfferTime[team] = game.time () + rg (3.0f, 4.0f);
+      m_humanDropBot[team] = -1;
+      m_humanDropPlayer[team] = -1;
+      m_humanDropWeapon[team] = 0;
+      m_humanDropPhase[team] = 0;
+      m_humanDropTime[team] = 0.0f;
+      m_humanDropDeadline[team] = 0.0f;
+      m_humanDropBuyIssued[team] = false;
+   }
+   ++m_roundChatNumber;
+   m_postPlantChatTime = 0.0f;
+   m_postPlantChatSent = false;
+   for (int slot = 0; slot < kGameMaxPlayers; ++slot) {
+      m_roundKills[slot] = 0;
+      m_pendingKillReaction[slot] = 0;
+      m_killReactionTime[slot] = 0.0f;
+   }
+   m_pendingOrderAcks.clear ();
+   m_nextCommsDebugTime = 0.0f;
+   for (int slot = 0; slot < kGameMaxPlayers; ++slot) {
+      m_debugBotMovedTime[slot] = game.time ();
+      m_debugBotOrigin[slot] = {};
    }
    reset ();
 

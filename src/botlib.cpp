@@ -6,6 +6,7 @@
 //
 
 #include <yapb.h>
+#include <bhop.h>
 
 ConVar cv_debug ("debug", "0", "Enables or disables useful messages about bot states. Not required for end users.", true, 0.0f, 4.0f);
 ConVar cv_debug_goal ("debug_goal", "-1", "Forces all alive bots to build a path and go to the graph node specified here.", true, -1.0f, kMaxNodes);
@@ -13,7 +14,9 @@ ConVar cv_user_follow_percent ("user_follow_percent", "20", "Specifies the perce
 ConVar cv_user_max_followers ("user_max_followers", "1", "Specifies how many bots can follow a single user.", true, 0.0f, static_cast <float> (kGameMaxPlayers / 4));
 
 ConVar cv_jasonmode ("jasonmode", "0", "If enabled, all bots will be forced to use only the knife, skipping weapon buying routines.");
-ConVar cv_radio_mode ("radio_mode", "2", "Allows bots to use radio or chatter.\nAllowed values: '0', '1', '2'.\nIf '0', radio and chatter is disabled.\nIf '1', only radio allowed.\nIf '2' chatter and radio allowed.", true, 0.0f, 2.0f);
+ConVar cv_radio_mode ("radio_mode", "1", "Allows bots to use radio or chatter.\nAllowed values: '0', '1', '2'.\nIf '0', radio and chatter is disabled.\nIf '1', only radio allowed.\nIf '2' chatter and radio allowed.", true, 0.0f, 2.0f);
+ConVar cv_bhop ("bhop", "1", "Allows occasional difficulty-scaled bunny-hop bursts outside combat.");
+ConVar cv_bhop_test ("bhop_test", "0", "Debug only: bhop on every eligible movement opportunity. Disable after testing.", true, 0.0f, 1.0f);
 
 ConVar cv_economics_rounds ("economics_rounds", "1", "Specifies whether bots are able to use team economics, like not buying any weapons for the whole team to keep money for better guns.");
 ConVar cv_economics_disrespect_percent ("economics_disrespect_percent", "25", "Allows bots to ignore economics and buy weapons with disrespect to economics.", true, 0.0f, 100.0f);
@@ -964,6 +967,40 @@ void Bot::pushRadioMessage (int message) {
    // this function inserts the radio message into the message queue
 
    if (cv_radio_mode.as <int> () == 0 || m_numFriendsLeft == 0 || m_isCreature) {
+      return;
+   }
+   const bool chatReady = m_lastTacticalChatTime <= 0.0f || m_lastTacticalChatTime + 10.0f <= game.time ();
+   const bool useChat = (m_commsStyle == CommsStyle::ChatOnly && chatReady)
+      || (m_commsStyle == CommsStyle::Both && (++m_commsSequence % 2 == 0) && chatReady);
+   if (useChat) {
+      const char *line = nullptr;
+      switch (message) {
+      case Radio::CoverMe: line = "Cover me."; break;
+      case Radio::YouTakeThePoint: line = "Take point."; break;
+      case Radio::HoldThisPosition: line = "Hold this position."; break;
+      case Radio::RegroupTeam: line = "Regroup."; break;
+      case Radio::FollowMe: line = "Follow me."; break;
+      case Radio::TakingFireNeedAssistance: line = "Taking fire. Need help."; break;
+      case Radio::GoGoGo: line = "Go now."; break;
+      case Radio::TeamFallback: line = "Fall back."; break;
+      case Radio::StickTogetherTeam: line = "Stay together."; break;
+      case Radio::GetInPositionAndWaitForGo: line = "Get in position and wait."; break;
+      case Radio::StormTheFront: line = "Push forward."; break;
+      case Radio::ReportInTeam: line = "Report in."; break;
+      case Radio::RogerThat: line = "Copy."; break;
+      case Radio::EnemySpotted: line = "Enemy spotted."; break;
+      case Radio::NeedBackup: line = "Need backup."; break;
+      case Radio::SectorClear: line = "Sector clear."; break;
+      case Radio::ImInPosition: line = "In position."; break;
+      case Radio::ReportingIn: line = "Reporting in."; break;
+      case Radio::ShesGonnaBlow: line = "Bomb is about to explode."; break;
+      case Radio::Negative: line = "Can't do that."; break;
+      case Radio::EnemyDown: line = "Enemy down."; break;
+      default: break;
+      }
+      if (line != nullptr) {
+         sendTeamCallout (line);
+      }
       return;
    }
    m_forceRadio = !game.is (GameFlags::HasBotVoice)
@@ -1969,8 +2006,12 @@ void Bot::setConditions () {
          }
       }
       else {
-         pushChatMessage (Chat::TeamKill, true);
-         pushChatterMessage (Chatter::FriendlyFire);
+         if (m_commsStyle == CommsStyle::RadioOnly) {
+            pushRadioMessage (Radio::Negative);
+         }
+         else {
+            sendTeamCallout ("My bad.");
+         }
       }
       m_lastVictim = nullptr;
    }
@@ -2511,6 +2552,7 @@ void Bot::checkRadioQueue () {
          || m_isCreature)) {
 
       m_radioOrder = 0;
+      m_textOrder = false;
       return;
    }
    float distanceSq = m_radioEntity->v.origin.distanceSq (pev->origin);
@@ -2522,10 +2564,10 @@ void Bot::checkRadioQueue () {
    case Chatter::GoingToPlantBomb:
    case Chatter::CoverMe:
       // check if line of sight to object is not blocked (i.e. visible)
-      if (seesEntity (m_radioEntity->v.origin) || m_radioOrder == Radio::StickTogetherTeam) {
+      if (m_textOrder || seesEntity (m_radioEntity->v.origin) || m_radioOrder == Radio::StickTogetherTeam) {
          if (game.isNullEntity (m_targetEntity)
             && game.isNullEntity (m_enemy)
-            && rg.chance (m_radioPercent)) {
+            && (m_textOrder || rg.chance (m_radioPercent))) {
 
             int numFollowers = 0;
 
@@ -2539,7 +2581,10 @@ void Bot::checkRadioQueue () {
             }
             int allowedFollowers = cv_user_max_followers.as <int> ();
 
-            if (m_radioEntity->v.weapons & cr::bit (Weapon::C4)) {
+            if (m_textOrder) {
+               allowedFollowers = game.maxClients ();
+            }
+            else if (m_radioEntity->v.weapons & cr::bit (Weapon::C4)) {
                allowedFollowers = 1;
             }
 
@@ -2731,7 +2776,7 @@ void Bot::checkRadioQueue () {
       break;
 
    case Radio::StormTheFront:
-      if (((game.isNullEntity (m_enemy) && seesEntity (m_radioEntity->v.origin)) || distanceSq < cr::sqrf (1024.0f)) && rg.chance (m_radioPercent)) {
+      if (m_textOrder || (((game.isNullEntity (m_enemy) && seesEntity (m_radioEntity->v.origin)) || distanceSq < cr::sqrf (1024.0f)) && rg.chance (m_radioPercent))) {
          pushRadioMessage (Radio::RogerThat);
 
          // don't pause/camp anymore
@@ -2760,7 +2805,7 @@ void Bot::checkRadioQueue () {
       break;
 
    case Radio::TeamFallback:
-      if ((game.isNullEntity (m_enemy) && seesEntity (m_radioEntity->v.origin)) || distanceSq < cr::sqrf (1024.0f)) {
+      if (m_textOrder || (game.isNullEntity (m_enemy) && seesEntity (m_radioEntity->v.origin)) || distanceSq < cr::sqrf (1024.0f)) {
          m_fearLevel += 0.5f;
 
          if (m_fearLevel > 1.0f) {
@@ -2952,7 +2997,7 @@ void Bot::checkRadioQueue () {
       break;
 
    case Radio::GetInPositionAndWaitForGo:
-      if (!m_isCreature && ((game.isNullEntity (m_enemy) && seesEntity (m_radioEntity->v.origin)) || distanceSq < cr::sqrf (1024.0f))) {
+      if (!m_isCreature && (m_textOrder || ((game.isNullEntity (m_enemy) && seesEntity (m_radioEntity->v.origin)) || distanceSq < cr::sqrf (1024.0f)))) {
          pushRadioMessage (Radio::RogerThat);
 
          if (getCurrentTaskId () == Task::Camp) {
@@ -3007,6 +3052,7 @@ void Bot::checkRadioQueue () {
       break;
    }
    m_radioOrder = 0; // radio command has been handled, reset
+   m_textOrder = false;
 }
 
 void Bot::tryHeadTowardRadioMessage () {
@@ -3076,6 +3122,36 @@ void Bot::frame () {
       }
    }
 
+   // A T already following an old route or camp task otherwise may never
+   // choose the planted bomb as a fresh goal. Stage far bots at the site once;
+   // normal post-plant defend selection takes over when they arrive.
+   if (game.mapIs (MapFlags::Demolition) && gameState.isBombPlanted ()
+      && m_team == Team::Terrorist && m_isAlive
+      && gameState.getBombTimeLeft () > 8.0f && game.isNullEntity (m_enemy)
+      && getCurrentTaskId () != Task::EscapeFromBomb && getCurrentTaskId () != Task::PlantBomb) {
+      const auto &bombPosition = gameState.getBombOrigin ();
+      if (!bombPosition.empty ()) {
+         if (pev->origin.distanceSq (bombPosition) <= cr::sqrf (700.0f)) {
+            m_postPlantRepositioned = true;
+         }
+         else if (!m_postPlantRepositioned
+            || (m_nextPostPlantRouteTime <= game.time () && getCurrentTaskId () != Task::MoveToPosition)) {
+            const int siteNode = graph.getNearest (bombPosition, 512.0f);
+            if (graph.exists (siteNode)) {
+               m_postPlantRepositioned = true;
+               m_nextPostPlantRouteTime = game.time () + 4.0f;
+               m_defendedBomb = false;
+               m_targetEntity = nullptr;
+               m_pathType = FindPath::Fast;
+               m_position = graph[siteNode].origin;
+               clearSearchNodes ();
+               clearTask (Task::MoveToPosition);
+               startTask (Task::MoveToPosition, TaskPri::MoveToPosition, siteNode, 0.0f, true);
+            }
+         }
+      }
+   }
+
    checkSpawnConditions ();
    checkForChat ();
    checkBreakablesAround ();
@@ -3099,6 +3175,11 @@ void Bot::update () {
 
    m_canSetAimDirection = true;
    m_isAlive = game.isAliveEntity (ent ());
+   if (!m_isAlive && m_pendingDeathLineTime > 0.0f && m_pendingDeathLineTime <= game.time ()) {
+      m_pendingDeathLineTime = 0.0f;
+      constexpr const char *lines[] = { "My bad.", "Unlucky.", "Nice try." };
+      sendTeamCallout (lines[m_index % 3]);
+   }
    m_team = game.getPlayerTeam (ent ());
    m_healthValue = cr::clamp (pev->health, 0.0f, 99999.9f);
 
@@ -3688,8 +3769,11 @@ void Bot::takeDamage (edict_t *inflictor, int damage, int armor, int bits) {
          m_lastEnemyOrigin = m_enemy->v.origin;
          m_enemyOrigin = m_enemy->v.origin;
 
-         pushChatMessage (Chat::TeamAttack);
-         pushChatterMessage (Chatter::FriendlyFire);
+         // The old TeamAttack bank expands %t through a teammate lookup.
+         // If the damage source is stale, that can accuse a different player.
+         if (m_commsStyle != CommsStyle::RadioOnly) {
+            sendTeamCallout ("Watch your fire.");
+         }
       }
       else {
          // increase radio percent
@@ -4036,12 +4120,133 @@ void Bot::runMovement () {
    // translate bot buttons
    translateInput ();
 
+   if (m_requestedJump) {
+      if (m_isAlive && isOnFloor () && m_jumpTime < game.time () && pev->maxspeed >= 10.0f) {
+         pev->button |= IN_JUMP;
+         m_jumpTime = game.time () + 2.0f;
+      }
+      m_requestedJump = false;
+   }
+   tryBhop ();
+
    engfuncs.pfnRunPlayerMove (ent (),
       getRpmAngles (), m_moveSpeed, m_strafeSpeed,
       0.0f, static_cast <uint16_t> (pev->button), static_cast <uint8_t> (pev->impulse), msecVal);
 
    // save our own copy of old buttons, since bot bot code is not running every frame now
    m_oldButtons = pev->button;
+}
+
+void Bot::tryBhop () {
+   const bool forceBhop = cv_bhop_test.as <int> () != 0;
+   const bool grounded = isOnFloor ();
+
+   // GoldSrc needs a fresh jump press at each landing. Release our own press
+   // in the air without interfering with navigation's deliberate jumps.
+   if (m_bhopReleaseJump && !grounded) {
+      pev->button &= ~IN_JUMP;
+      m_bhopReleaseJump = false;
+   }
+   const auto task = getCurrentTaskId ();
+   const bool fighting = (!game.isNullEntity (m_enemy)
+      && game.isAliveEntity (m_enemy) && m_seeEnemyTime + 2.0f > game.time ())
+      || (m_states & Sense::SeeingEnemy)
+      || task == Task::Attack || task == Task::SeekCover || task == Task::Hide;
+   const bool moving = task == Task::Normal || task == Task::MoveToPosition || task == Task::FollowUser;
+   const bool safeContext = cv_bhop && m_isAlive && !m_isCreature && !m_notStarted
+      && !fighting && moving && !m_isStuck && !m_hasProgressBar && !m_hasHostage && !m_hasC4
+      && !isOnLadder () && !isInWater ();
+   if (forceBhop && safeContext && m_currentWeapon >= 0 && m_currentWeapon < 32
+      && (cr::bit (m_currentWeapon) & (kPrimaryWeaponMask | kSecondaryWeaponMask))
+      && m_nextBhopKnifeSwitchTime <= game.time ()) {
+      selectWeaponById (Weapon::Knife);
+      m_nextBhopKnifeSwitchTime = game.time () + 1.0f;
+   }
+   // In the forced diagnostic mode, add limited side input while airborne.
+   // Keep the route in front of the bot; strong lateral input made navigation
+   // turn back toward the path after each jump and killed its forward speed.
+   if (forceBhop && safeContext && !grounded
+      && !(m_pathFlags & (NodeFlag::Crouch | NodeFlag::Ladder))
+      && !(m_currentTravelFlags & PathFlag::Jump)
+      && m_destOrigin.distanceSq2d (pev->origin) > cr::sqrf (96.0f)
+      && pev->velocity.length2d () > 180.0f) {
+      const auto right = m_moveAngles.right ().get2d ();
+      const float lateralSpeed = pev->velocity | right;
+      const auto forward = m_moveAngles.forward ().get2d ();
+      const float forwardSpeed = pev->velocity | forward;
+      if (forwardSpeed > pev->velocity.length2d () * 0.8f) {
+         const int side = lateralSpeed > 25.0f ? -1 : lateralSpeed < -25.0f ? 1
+            : (static_cast <int> (game.time () * 6.0f) & 1) ? 1 : -1;
+         m_moveSpeed = pev->maxspeed * 0.85f;
+         m_strafeSpeed = pev->maxspeed * 0.35f * static_cast <float> (side);
+      }
+   }
+   const bool readyOnGround = !isDucking ()
+      && !(m_pathFlags & (NodeFlag::Crouch | NodeFlag::Ladder))
+      && !(m_currentTravelFlags & PathFlag::Jump)
+      && pev->maxspeed >= 180.0f && m_moveSpeed > pev->maxspeed * 0.6f
+      && pev->velocity.length2d () > 190.0f;
+
+   const bool justLanded = grounded && !m_bhopWasGrounded;
+   m_bhopWasGrounded = grounded;
+   if (!safeContext || (grounded && !readyOnGround)) {
+      m_bhopJumpsLeft = 0;
+      if (fighting) m_nextBhopBurstTime = game.time () + 5.0f;
+      return;
+   }
+   if (m_bhopReleaseJump && grounded && m_jumpTime + 0.3f < game.time ()) {
+      m_bhopReleaseJump = false;
+      m_bhopJumpsLeft = 0;
+   }
+   if (!grounded || (pev->button & IN_JUMP) || (m_oldButtons & IN_JUMP)) return;
+
+   const bool continuing = m_bhopJumpsLeft > 0 && justLanded;
+   const bool starting = forceBhop || (m_bhopJumpsLeft == 0 && m_nextBhopBurstTime <= game.time ()
+      && m_jumpTime + 1.2f < game.time ());
+   if (!continuing && !starting) return;
+
+   const int difficulty = cr::clamp (m_difficulty, 0, 4);
+   const int chance = forceBhop ? 100 : continuing ? bhopContinueChance (difficulty) : bhopStartChance (difficulty);
+   if (!rg.chance (chance)) {
+      if (continuing) m_bhopJumpsLeft = 0;
+      else m_nextBhopBurstTime = game.time () + rg (3.0f, 5.0f);
+      return;
+   }
+   TraceResult obstacle {};
+   if (!forceBhop && isBlockedForward (m_moveAngles.forward (), &obstacle)) {
+      m_bhopJumpsLeft = 0;
+      m_nextBhopBurstTime = game.time () + 5.0f;
+      return;
+   }
+   if (continuing) {
+      --m_bhopJumpsLeft;
+   }
+   else {
+      m_bhopJumpsLeft = bhopBurstLength (difficulty) - 1;
+      m_nextBhopBurstTime = game.time () + rg (8.0f, 14.0f);
+   }
+   pev->button |= IN_JUMP;
+   m_jumpTime = game.time ();
+   m_bhopReleaseJump = true;
+}
+
+bool Bot::requestJump () {
+   if (!m_isAlive || m_isCreature || !isOnFloor () || m_jumpTime > game.time () || pev->maxspeed < 10.0f) {
+      return false;
+   }
+   m_requestedJump = true;
+   return true;
+}
+
+bool Bot::declineOptionalOrder () {
+   if (!rg.chance (8)) return false;
+   if (m_commsStyle == CommsStyle::RadioOnly) {
+      pushRadioMessage (Radio::Negative);
+   }
+   else {
+      sendTeamCallout ("Sorry, can't rn.");
+   }
+   return true;
 }
 
 bool Bot::isOutOfBombTimer () {
