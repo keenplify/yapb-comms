@@ -1,0 +1,59 @@
+name: YaPB comms Linux x86
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out YaPB and dependencies
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install 32-bit compiler support
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++-multilib
+
+      - name: Build Linux x86 YaPB
+        run: |
+          cmake -S . -B build-linux-x86 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS=-m32 \
+            -DCMAKE_SHARED_LINKER_FLAGS=-m32
+          cmake --build build-linux-x86 --parallel 4
+          file build-linux-x86/libyapb.so | grep -q 'ELF 32-bit'
+          mkdir -p release
+          cp build-linux-x86/libyapb.so release/yapb-linux-x86.so
+          cd release
+          sha256sum yapb-linux-x86.so > yapb-linux-x86.so.sha256
+
+      - name: Save build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yapb-comms-linux-x86
+          path: release/
+          if-no-files-found: error
+
+      - name: Publish commit-pinned release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="comms-${GITHUB_SHA}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/yapb-linux-x86.so release/yapb-linux-x86.so.sha256 --clobber
+          else
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "YaPB comms ${GITHUB_SHA:0:12}" \
+              --notes "Linux x86 Counter-Strike 1.6 bot binary built from this commit." \
+              release/yapb-linux-x86.so release/yapb-linux-x86.so.sha256
+          fi
