@@ -238,6 +238,10 @@ class AiSidecarTests(unittest.TestCase):
             sidecar.send_local('yb ai 2 chat team 0 "on my way"', queue)
             self.assertEqual((queue / "pending.cmd").read_text(),
                              'yb ai 2 chat team 0 "on my way"')
+            (queue / "pending.cmd").unlink()
+            sidecar.send_local('yb ai 2 chat all 0 "привет"', queue)
+            self.assertEqual((queue / "pending.cmd").read_text(encoding="utf-8"),
+                             'yb ai 2 chat all 0 "привет"')
 
     def test_provider_receives_game_context(self):
         payloads = []
