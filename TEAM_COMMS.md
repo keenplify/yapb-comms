@@ -18,8 +18,9 @@ radio is team-only too. The alternating style uses one channel for each message,
 never both for the same callout. Random bot chat remains disabled.
 Bot text chat is lowercase, including acknowledgements and round messages.
 
-Chat-capable bots answer a human who addresses a bot by name or says `bot` or
-`bots`. A message in `say` gets a short `say` reply; a message in `say_team`
+Chat-capable bots answer a human who addresses a bot by name, says `bot` or
+`bots`, asks a question, greets with `hello`/`hi`/`hey`/`yo`, or asks why no
+one is responding. A message in `say` gets a short `say` reply; a message in `say_team`
 gets a `say_team` reply. One bot responds, with an eight-second global cooldown.
 Radio-only bots do not type. All-chat messages cannot issue tactical orders.
 Human team-chat orders that are recognized take priority over social replies.
@@ -48,19 +49,56 @@ only speak after checking what the bot actually did.
 
 ## Optional AI sidecar
 
-`tools/ai_sidecar.py` connects addressed human chat to DeepSeek, or another
-OpenAI-compatible chat-completions endpoint. YaPB never waits on HTTP. With
-`yb_ai_bridge 1`, it writes one log event for addressed chat; the sidecar reads
-new events, makes a bounded provider request, then sends only validated `yb ai`
-commands through a private local command queue. Existing keyword team orders still run locally
-before the model. The AI bridge is off by default.
+`tools/ai_sidecar.py` connects human questions, greetings, ordinary conversation,
+and existing bot speech
+events to DeepSeek or another OpenAI-compatible chat-completions endpoint.
+YaPB never waits on HTTP. With `yb_ai_bridge 1`, it writes bounded log events;
+the sidecar sends only validated `yb ai` commands through a private local
+queue. Keyword team orders still run locally. The bridge is enabled by
+default and routes chat to the sidecar only while its provider check is fresh.
+Otherwise YaPB uses its local short replies. The sidecar checks the provider
+at startup and after a failed request, with a 30-second retry delay.
+Human messages take priority over canned bot speech. Stale events are dropped,
+and at most two canned lines from one log read are handled, so a busy round
+does not keep human replies waiting behind a growing queue.
+Human replies carry the original player's slot to YaPB. If the selected bot
+dies before the reply arrives, YaPB chooses another chat-capable bot with the
+same alive/dead visibility and team channel. Human replies use a two-second
+minimum interval; the hourly provider budget still applies.
 
 Each event includes the selected bot's map, nearest verified CZ callout,
 current weapon, health, money, alive teammate and enemy counts, bomb state,
 round age, and player slots of enemies the bot currently sees with line of
-sight. It also includes the player's normalized message and chat channel.
+sight. It also includes the player's normalized message or the bot's original
+line and chat channel.
 A team-chat reply stays in team chat, and an all-chat reply stays in all chat.
 Bot replies are lowercase and at most 30 characters.
+Purposeful bot chat removes periods, including from model replies.
+
+Fixed bot lines such as `cover me`, kill reactions, buy or eco calls,
+and sighting reports can be rephrased by the model. The original action is
+still applied locally; only the wording changes. The sidecar checks that
+numbers, sites, and key tactical facts survive a rephrase. It keeps up to
+1,000 variants per map, channel, and original line in the shared 16competitive
+PostgreSQL cache, reached through its authenticated API. The sidecar also keeps
+a local hot copy in `addons/yapb/data/ai/replies.sqlite3`; HLDS never receives
+database credentials. Once a variant exists, it has a 30%
+chance of being reused while the cache grows. The cache is also capped at
+50,000 rows per server instance. It always uses a cached or
+original line when the event request budget is exhausted or the model fails.
+The SQLite file is local to one server instance and mode `600`.
+Set `YAPB_CACHE_API_URL` and `YAPB_CACHE_TOKEN` in the sidecar `.env` to share
+variants between servers. The backend uses the same token in its private
+`YAPB_CACHE_TOKEN` environment variable. Local loopback HTTP or HTTPS is
+supported; remote cache URLs require HTTPS. Each sidecar refreshes a key from
+the backend at most once every five minutes and writes new variants through.
+If the backend is down, it continues using its local cache and tries again on
+the next refresh. The backend route is `/internal/yapb/replies`; its database
+migration is `0056_yapb_reply_cache.sql`.
+The 16competitive backend supervises one copy of the sidecar per host when
+`YAPB_AI_API_KEY` is set; it watches all local match instances. Opening `glhf`,
+pre/post round chat, and occasional dead chat go directly to team chat so
+these short lines still work when the provider is slow or unavailable.
 
 During the early buy period, a chat-capable bot with a primary weapon and at
 least $6000 left may ask `anyone need a drop?` if a nearby teammate bot lacks
@@ -75,20 +113,36 @@ first and the rich bot acknowledges by radio. A human weapon request such as
 positive and a nearby bot has enough money to replace its own gun.
 
 The sidecar reads `.env` beside `ai_sidecar.py` by default. Copy
-`tools/.env.example` to `tools/.env`, set `DEEPSEEK_API_KEY` and
-and restrict the file to mode `600`. Use `--env-file`
+`tools/.env.example` to `tools/.env`, set `DEEPSEEK_API_KEY`, and
+restrict the file to mode `600`. Use `--env-file`
 to give each HLDS instance its own credential file. Process environment
 variables override values from the file. The sidecar parses the file as data;
 it never executes shell expressions in it. `YAPB_AI_API_URL` defaults to
 `https://api.deepseek.com/chat/completions`;
-`YAPB_AI_MODEL` defaults to `deepseek-chat`. Start one sidecar per HLDS instance
-with that instance's log directory, then set `yb_ai_bridge 1`. The queue defaults
-to the sibling `data/ai` directory; use `--queue-dir` when the instance has a
-different layout. No RCON password is needed.
+`YAPB_AI_MODEL` defaults to `deepseek-flash`. For one HLDS, start the sidecar
+with its log directory; the queue defaults to the sibling `data/ai` directory.
+Use `--queue-dir` when the instance has a different layout. No RCON password
+is needed.
+
+For several 16competitive match servers on one host, start **one sidecar
+process** with `--instances-root`. It discovers new match directories under
+`GAME_SERVER_INSTANCES_PATH` and watches each server's own YaPB logs and queue.
+Retained match directories are ignored until their YaPB game log becomes active;
+idle workers are released after ten minutes without a game-log update.
+Each instance keeps a separate lock and SQLite fallback; all threads in that
+process share the same provider request budget and PostgreSQL variant cache.
+Do not also start a separate sidecar on one of those queues. The default
+30 total and 10 event-generation requests per hour apply to the entire host
+process in this mode.
+
+```sh
+./tools/start_ai_sidecar.sh --instances-root /path/to/game-server-instances
+```
 Do not put credentials in `yapb.cfg` or a tracked file. `.env` is gitignored;
 keep the same private permissions when copying it elsewhere. Defaults are one
-request every eight seconds, 30 requests per hour, and a six-second provider
-timeout. No historical log entries are replayed.
+request every eight seconds, 30 requests per hour total, up to 10 of those
+for generating event variants, and a six-second provider timeout. No
+historical log entries are replayed.
 
 ```bash
 install -m 600 tools/.env.example tools/.env
@@ -99,7 +153,7 @@ ${EDITOR:-vi} tools/.env
 Only `none`, `jump`, and `follow` actions are accepted from this model path.
 YaPB checks bot and target availability again. Provider failures are logged
 to `addons/yapb/data/logs/ai_sidecar.log` and stderr without blocking the
-game server. The sidecar log rotates at 1 MB and never records the API key,
+game server. The sidecar log rotates at 1 MB and never records the API key
 or raw player message.
 
 ## Working commands
@@ -155,6 +209,8 @@ callouts, for example `2 mid` or `1 B`. The count includes only living enemies
 in the reporting bot's view with a clear sight line, close to the same area.
 Reports use team chat and have a 12-second per-team, per-place cooldown.
 `yb_comms_debug 1` logs the reported count and place.
+The stock `sector clear` radio now only fires for CT bomb searches, with a
+30-second team cooldown. Ordinary goal visits no longer announce a clear sector.
 When a CT starts defusing a planted bomb, it sends one urgent `Cover me.`
 team-chat line. Retries are limited to once every 12 seconds.
 

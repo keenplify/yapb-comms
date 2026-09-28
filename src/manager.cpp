@@ -18,7 +18,66 @@
 
 ConVar cv_comms_debug ("comms_debug", "0", "Prints short captain and navigation diagnostics to the game console.", true, 0.0f, 1.0f);
 ConVar cv_round_chat ("round_chat", "1", "One short team-chat line near each round start and end.", true, 0.0f, 1.0f);
-ConVar cv_ai_bridge ("ai_bridge", "0", "Send addressed player chat to an external AI sidecar via the YaPB log.", true, 0.0f, 1.0f);
+ConVar cv_ai_bridge ("ai_bridge", "1", "Use the local AI sidecar for addressed chat when its provider is reachable.", true, 0.0f, 1.0f);
+
+bool BotManager::aiBridgeReady () const {
+   const auto path = strings.joinPath (bstor.getRunningPath (), folders.data, "ai", "ready");
+   struct stat info {};
+   const auto now = std::time (nullptr);
+   return stat (path.chars (), &info) == 0 && info.st_size == 0
+      && info.st_mtime <= now && now - info.st_mtime <= 15;
+}
+
+void BotManager::logAiEvent (Bot *bot, edict_t *player, StringRef text, bool teamOnly, bool canned) {
+   // Snapshot only what this bot can currently know. Canned lines are sent
+   // through the same sidecar as addressed human chat and keep their channel.
+   loadMapCallouts ();
+   String place = "unknown";
+   float placeDistance = cr::sqrf (1000.0f);
+   for (const auto &callout : m_callouts) {
+      if (cr::abs (callout.position.z - bot->pev->origin.z) > 256.0f) continue;
+      const float distance = callout.position.distanceSq2d (bot->pev->origin);
+      if (distance < placeDistance) {
+         place = callout.name;
+         placeDistance = distance;
+      }
+   }
+   place.lowercase ();
+   int visible[3] { -1, -1, -1 };
+   int visibleCount = 0;
+   for (const auto &client : util.getClients ()) {
+      if (!(client.flags & ClientFlags::Used) || client.ent == nullptr
+         || client.team2 == bot->m_team || !game.isAliveEntity (client.ent)
+         || !bot->isInViewCone (client.ent->v.origin)
+         || !bot->seesEntity (client.ent->v.origin)) continue;
+      if (visibleCount < 3) visible[visibleCount] = game.indexOfPlayer (client.ent);
+      ++visibleCount;
+   }
+   StringRef weapon = "unknown";
+   for (const auto &info : conf.getWeapons ()) {
+      if (info.id == bot->m_currentWeapon) {
+         weapon = info.name;
+         break;
+      }
+   }
+   // The sidecar tails YaPB's log. Keep AI context out of the player's console.
+   const auto logPath = bstor.buildPath (BotFile::LogFile);
+   std::FILE *stream = std::fopen (logPath.chars (), "a");
+   if (!stream) return;
+   const auto now = std::time (nullptr);
+   char timestamp[20] {};
+   const auto local = std::localtime (&now);
+   if (local) std::strftime (timestamp, sizeof (timestamp), "%Y-%m-%d %H:%M:%S", local);
+   std::fprintf (stream, "%s (INFO): [YaPB ai] %s bot=%d player=%d channel=%s team=%d map=%s place=%s weapon=%s hp=%d money=%d friends=%d enemies=%d bomb=%d round=%.0f visible=%d slots=%d,%d,%d text=%s\n",
+      timestamp,
+      canned ? "event" : "chat", bot->m_index, player ? game.indexOfPlayer (player) : -1,
+      teamOnly ? "team" : "all", bot->m_team, game.getMapName (), place.chars (), weapon.chars (),
+      static_cast <int> (bot->pev->health), bot->m_moneyAmount,
+      bot->m_numFriendsLeft, bot->m_numEnemiesLeft, gameState.isBombPlanted (),
+      game.time () - gameState.getRoundStartTime (), visibleCount,
+      visible[0], visible[1], visible[2], text.chars ());
+   std::fclose (stream);
+}
 constexpr float kCaptainSilenceSeconds = 12.0f;
 
 ConVar cv_autovacate ("autovacate", "1", "Kicks bots to automatically make room for human players.");
@@ -375,7 +434,8 @@ void BotManager::frame () {
                   }
                   else if (std::strncmp (pos, "chat team ", 10) == 0 || std::strncmp (pos, "chat all ", 9) == 0) {
                      pos += pos[5] == 't' ? 10 : 9;
-                     safe = *pos++ == '"';
+                     if (*pos != '"') safe = number () && *pos++ == ' ';
+                     safe = safe && *pos++ == '"';
                      const char *start = pos;
                      while (safe && *pos && *pos != '"') {
                         const char ch = *pos++;
@@ -387,7 +447,11 @@ void BotManager::frame () {
                   }
                   else safe = false;
                }
-               if (safe) game.serverCommand ("%s", line);
+               if (safe) {
+                  if (cv_comms_debug) logger.message ("[YaPB ai] queue accepted: %s", line);
+                  game.serverCommand ("%s", line);
+               }
+               else if (cv_comms_debug) logger.message ("[YaPB ai] queue rejected invalid command");
             }
          }
       }
@@ -675,7 +739,6 @@ void BotManager::maintainCaptains () {
          captain->sendTeamCallout (line);
          m_botCaptainIndex[team] = captain->m_index;
          m_economyCallSent[team] = true;
-         m_preRoundChatSent[team] = true;
          if (cv_comms_debug) logger.message ("[YaPB comms] economy captain=%d team=%d line=%s",
             captain->m_index, team, line);
       }
@@ -811,6 +874,23 @@ void BotManager::maintainEnemyCallouts () {
 void BotManager::maintainRoundChat () {
    if (!cv_round_chat || game.is (GameFlags::FreeForAll)) return;
    const bool roundOver = gameState.isRoundOver ();
+   if (!roundOver && game.time () >= m_deadChatTime) {
+      Bot *dead = nullptr;
+      int eligible = 0;
+      for (const auto &bot : bots) {
+         if (bot->m_isAlive || bot->m_isCreature || bot->m_commsStyle == CommsStyle::RadioOnly
+            || (bot->m_lastTacticalChatTime > 0.0f
+               && bot->m_lastTacticalChatTime + 10.0f > game.time ())) continue;
+         ++eligible;
+         if (rg (1, eligible) == 1) dead = bot.get ();
+      }
+      if (dead) {
+         constexpr const char *lines[] = { "my bad", "unlucky", "nice try", "im watching" };
+         dead->sendAddressedReply (lines[(m_roundChatNumber + dead->m_index) % 4], true, true);
+         m_deadChatTime = game.time () + rg (18.0f, 28.0f);
+      }
+      else m_deadChatTime = game.time () + 3.0f;
+   }
    if (!roundOver && gameState.isBombPlanted () && !m_postPlantChatSent) {
       if (m_postPlantChatTime <= 0.0f) m_postPlantChatTime = game.time () + rg (1.0f, 2.5f);
       if (game.time () >= m_postPlantChatTime) {
@@ -853,12 +933,12 @@ void BotManager::maintainRoundChat () {
          if (rg (1, eligible) == 1) speaker = bot.get ();
       }
       if (!speaker) continue;
-      constexpr const char *preLines[] = { "gl team", "we got this", "play smart", "let's focus" };
+      constexpr const char *preLines[] = { "glhf", "we got this", "play smart", "let's focus" };
       constexpr const char *winLines[] = { "nice round", "good stuff", "clean", "well played" };
       const int variation = (m_roundChatNumber + speaker->m_index) % 4;
-      const char *line = !roundOver ? preLines[variation]
+      const char *line = !roundOver ? (m_roundChatNumber == 1 ? "glhf" : preLines[variation])
          : m_lastWinner == team ? winLines[variation] : "nt";
-      speaker->sendTeamCallout (line);
+      speaker->sendAddressedReply (line, true, true);
       sent = true;
       if (cv_comms_debug) logger.message ("[YaPB comms] phase=%s team=%d bot=%d line=%s",
          roundOver ? "post" : "pre", team, speaker->m_index, line);
@@ -3083,10 +3163,12 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
                return false;
             };
             const bool genericAddress = containsWord ("bot") || containsWord ("bots");
+            const bool openConversation = question || asksForResponse (engfuncs.pfnCmd_Args ())
+               || startsWithGreeting (engfuncs.pfnCmd_Args ())
+               || (cv_ai_bridge && aiBridgeReady () && isConversationalStatement (words));
             for (const auto &bot : bots) {
                if (bot->m_isCreature || bot->m_commsStyle == CommsStyle::RadioOnly
                   || bot->m_isAlive != game.isAliveEntity (ent)
-                  || (bot->m_lastTacticalChatTime > 0.0f && bot->m_lastTacticalChatTime + 10.0f > game.time ())
                   || (cmd == "say_team" && bot->m_team != game.getRealPlayerTeam (ent))) {
                   continue;
                }
@@ -3094,48 +3176,11 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
                bool unused = false;
                const bool named = normalizeTeamPhrase (bot->pev->netname.chars (), botName, unused)
                   && std::strlen (botName) >= 3 && containsWord (botName);
-               if (!rosterQuestion && !genericAddress && !named) {
+               if (!rosterQuestion && !genericAddress && !named && !openConversation) {
                   continue;
                }
-               if (cv_ai_bridge) {
-                  // Send a bounded snapshot of information this bot can know.
-                  // Player text is normalized before it reaches the log.
-                  loadMapCallouts ();
-                  String place = "unknown";
-                  float placeDistance = cr::sqrf (1000.0f);
-                  for (const auto &callout : m_callouts) {
-                     if (cr::abs (callout.position.z - bot->pev->origin.z) > 256.0f) continue;
-                     const float distance = callout.position.distanceSq2d (bot->pev->origin);
-                     if (distance < placeDistance) {
-                        place = callout.name;
-                        placeDistance = distance;
-                     }
-                  }
-                  place.lowercase ();
-                  int visible[3] { -1, -1, -1 };
-                  int visibleCount = 0;
-                  for (const auto &client : util.getClients ()) {
-                     if (!(client.flags & ClientFlags::Used) || client.ent == nullptr
-                        || client.team2 == bot->m_team || !game.isAliveEntity (client.ent)
-                        || !bot->isInViewCone (client.ent->v.origin)
-                        || !bot->seesEntity (client.ent->v.origin)) continue;
-                     if (visibleCount < 3) visible[visibleCount] = game.indexOfPlayer (client.ent);
-                     ++visibleCount;
-                  }
-                  StringRef weapon = "unknown";
-                  for (const auto &info : conf.getWeapons ()) {
-                     if (info.id == bot->m_currentWeapon) {
-                        weapon = info.name;
-                        break;
-                     }
-                  }
-                  logger.message ("[YaPB ai] chat bot=%d player=%d channel=%s team=%d map=%s place=%s weapon=%s hp=%d money=%d friends=%d enemies=%d bomb=%d round=%.0f visible=%d slots=%d,%d,%d text=%s",
-                     bot->m_index, game.indexOfPlayer (ent), cmd == "say_team" ? "team" : "all",
-                     game.getRealPlayerTeam (ent), game.getMapName (), place.chars (), weapon.chars (),
-                     static_cast <int> (bot->pev->health), bot->m_moneyAmount,
-                     bot->m_numFriendsLeft, bot->m_numEnemiesLeft, gameState.isBombPlanted (),
-                     game.time () - gameState.getRoundStartTime (), visibleCount,
-                     visible[0], visible[1], visible[2], words);
+               if (cv_ai_bridge && aiBridgeReady ()) {
+                  logAiEvent (bot.get (), ent, words, cmd == "say_team", false);
                }
                else if (rosterQuestion) {
                   constexpr const char *replies[] = { "Maybe.", "You tell me.", "Could be. Why?" };
@@ -3188,7 +3233,10 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
             m_lastHumanTeamChat[target.team] = game.time ();
          }
 
-         if (radioCommand != Radio::RogerThat && radioCommand != Radio::Negative && radioCommand != Radio::ReportingIn) {
+         // Bot radio is information for players, not a fresh team order.
+         // Relaying it to every bot creates chains of unrelated replies.
+         if (!game.isFakeClientEntity (ent) && radioCommand != Radio::RogerThat
+            && radioCommand != Radio::Negative && radioCommand != Radio::ReportingIn) {
             for (const auto &bot : bots) {
 
                // validate bot
@@ -3368,6 +3416,7 @@ void BotManager::initRound () {
       m_humanDropBuyIssued[team] = false;
    }
    ++m_roundChatNumber;
+   m_deadChatTime = game.time () + rg (8.0f, 12.0f);
    m_postPlantChatTime = 0.0f;
    m_postPlantChatSent = false;
    for (int slot = 0; slot < kGameMaxPlayers; ++slot) {

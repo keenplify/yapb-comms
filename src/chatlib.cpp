@@ -415,6 +415,13 @@ void Bot::checkForChat () {
    }
 }
 
+static void normalizeBotChat (String &line) {
+   line.lowercase ();
+   for (int i = static_cast <int> (line.length ()) - 1; i >= 0; --i) {
+      if (line[i] == '.') line.erase (i, 1);
+   }
+}
+
 void Bot::sendToChat (StringRef message, bool teamOnly) {
    // this function prints saytext message to all players
 
@@ -423,7 +430,8 @@ void Bot::sendToChat (StringRef message, bool teamOnly) {
    }
 
    String line { message };
-   line.lowercase ();
+   normalizeBotChat (line);
+   if (line.empty ()) return;
 
    // special handling for legacy games
    if (game.is (GameFlags::Legacy)) {
@@ -438,16 +446,21 @@ void Bot::sendTeamCallout (StringRef message) {
    sendAddressedReply (message, true);
 }
 
-void Bot::sendAddressedReply (StringRef message, bool teamOnly) {
+void Bot::sendAddressedReply (StringRef message, bool teamOnly, bool fromAi) {
    // Purposeful messages work while the old random chat bank is disabled.
    // All callers use fixed strings, never text copied from a player.
    if (m_isCreature || message.empty () || game.is (GameFlags::FreeForAll)
-      || (m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())) {
+      || (!fromAi && m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())) {
       return;
    }
    m_lastTacticalChatTime = game.time ();
    String line { message };
-   line.lowercase ();
+   normalizeBotChat (line);
+   if (line.empty ()) return;
+   if (!fromAi && cv_ai_bridge && bots.aiBridgeReady ()) {
+      bots.logAiEvent (this, nullptr, line, teamOnly, true);
+      return;
+   }
    if (game.is (GameFlags::Legacy)) {
       sendToChatLegacy (line, teamOnly);
    }

@@ -17,7 +17,8 @@ Metamod. The server package used for validation loads
    `say_team`; check that its reply uses the same channel. Hit a teammate bot
    once and check that any text reaction appears only in team chat.
    Ask `is everyone a bot?` in either chat channel and check that one bot
-   answers briefly in that channel.
+   answers briefly in that channel. Try `hello` and `whyy are no one
+   responding` without naming a bot; one chat-capable bot should answer.
 7. Try `say_team 3 A 2 B` on a supported map with five available teammate
    bots. Test `say_team can u jump` near a grounded bot. From the server
    console, try `yb ai <bot_slot> jump` or `yb ai <bot_slot> follow <player_slot>`;
@@ -48,7 +49,9 @@ Metamod. The server package used for validation loads
     file. `[YaPB bhop]` also records a moving bot's speed. Compare
     `yb_bhop_test 1` (jump whenever movement is eligible) with
     `yb_bhop 0` (no bhop). Restore `yb_bhop 1`, `yb_bhop_test 0`, and
-    `yb_comms_debug 0` after testing.
+    `yb_comms_debug 0` after testing. The same log records `[YaPB ai] queue
+    accepted` and `chat dispatched` for sidecar replies. Stock `sector clear`
+    radio is limited to CT bomb searches, at most once every 30 seconds per team.
 13. Let bots see one or two enemies near Middle, A, or B. Expect one short
     team-chat sighting with the visible count, such as `2 mid`, and a
     `[YaPB comms] sighting` entry in the log. Repeated sightings at the same
@@ -68,11 +71,17 @@ Metamod. The server package used for validation loads
 17. For DeepSeek, start `tools/start_ai_sidecar.sh` from the installed
     `addons/yapb/tools` directory. Copy `tools/.env.example` to `tools/.env`,
     set the key and run `chmod 600 tools/.env`; process
-    environment variables are also supported. Enable `yb_ai_bridge 1`
-    after the sidecar is running. Address a bot in all chat and team chat;
+    environment variables are also supported. `yb_ai_bridge` defaults to 1
+    and uses the provider only while the sidecar confirms it is reachable.
+    Address a bot in all chat and team chat;
     its lowercase answer should stay in the same channel. Check sidecar
     stderr on provider or local queue failures. See `TEAM_COMMS.md` for limits and
-    context sent to the model.
+    context sent to the model. Once a fixed bot line is generated, its
+    variants are stored in `data/ai/replies.sqlite3` and reused across restarts.
+    With `YAPB_CACHE_API_URL` and `YAPB_CACHE_TOKEN` configured on the sidecar,
+    they are also shared through the 16competitive API and PostgreSQL.
+    For several 16competitive HLDS instances on one host, run a single
+    `start_ai_sidecar.sh --instances-root GAME_SERVER_INSTANCES_PATH` instead.
 18. During buy time, leave one bot with a primary and at least $6000 and
     another nearby bot without a primary and at most $2000. Expect an offer
     or request, a delayed answer, and a real weapon drop. With a rich nearby
@@ -85,5 +94,6 @@ previous `yapb.cfg` values. The callout and alias files can remain unused.
 
 Map routes work only where the included CZ NAV place names and the target
 CS 1.6 BSP size were verified. Some requested intents are recognized but
-reported unavailable; see `TEAM_COMMS.md` for the exact list. No model
-provider is called at runtime.
+reported unavailable; see `TEAM_COMMS.md` for the exact list. The optional
+sidecar calls the configured model provider when it is running and has a
+valid key.

@@ -780,7 +780,7 @@ public:
    void dropWeaponForUser (edict_t *user, bool discardC4);
    void sendToChat (StringRef message, bool teamOnly);
    void sendTeamCallout (StringRef message);
-   void sendAddressedReply (StringRef message, bool teamOnly);
+   void sendAddressedReply (StringRef message, bool teamOnly, bool fromAi = false);
    bool requestJump ();
    bool declineOptionalOrder ();
    void sendToChatLegacy (StringRef message, bool teamOnly);
@@ -943,6 +943,7 @@ extern ConVar cv_radio_mode;
 extern ConVar cv_ignore_enemies;
 extern ConVar cv_ignore_objectives;
 extern ConVar cv_chat;
+extern ConVar cv_ai_bridge;
 extern ConVar cv_language;
 extern ConVar cv_show_latency;
 extern ConVar cv_show_avatars;

@@ -100,6 +100,17 @@ int main () {
    assert (asksAboutBots ("any humans here?"));
    assert (!asksAboutBots ("bots follow me"));
    assert (!asksAboutBots ("one bot at B"));
+   assert (asksForResponse ("whyy are no one responding"));
+   assert (asksForResponse ("anyone gonna reply"));
+   assert (!asksForResponse ("one mid"));
+   assert (startsWithGreeting ("hello"));
+   assert (startsWithGreeting ("hey team"));
+   assert (!startsWithGreeting ("hold b"));
+   assert (isConversationalStatement ("i love pizza"));
+   assert (isConversationalStatement ("im bored"));
+   assert (isConversationalStatement ("pizza is great"));
+   assert (!isConversationalStatement ("one mid"));
+   assert (!isConversationalStatement ("rush b"));
    TeamAllocation allocation {};
    assert (parseTeamAllocation ("3 A 2 B", allocation));
    assert (allocation.a == 3 && allocation.b == 2 && allocation.mid == 0);

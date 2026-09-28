@@ -66,6 +66,7 @@ private:
    float m_postRoundChatTime[kGameTeamNum] {};
    bool m_preRoundChatSent[kGameTeamNum] {};
    bool m_postRoundChatSent[kGameTeamNum] {};
+   float m_deadChatTime {};
    float m_postPlantChatTime {};
    bool m_postPlantChatSent {};
    int m_roundKills[kGameMaxPlayers] {};
@@ -131,6 +132,8 @@ public:
    float getAverageTeamKPD (bool calcForBots);
 
    void frame ();
+   bool aiBridgeReady () const;
+   void logAiEvent (Bot *bot, edict_t *player, StringRef text, bool teamOnly, bool canned);
    void createKillerEntity ();
    void destroyKillerEntity ();
    void touchKillerEntity (Bot *bot);

@@ -424,7 +424,7 @@ int BotControl::cmdAi () {
       constexpr const char *lines[] = { "My bad.", "Unlucky.", "You got this." };
       const auto lineText = hasArg (argument) ? arg <StringRef> (argument) : StringRef ("0");
       if (lineText.length () != 1 || lineText[0] < '0' || lineText[0] > '2') return BotCommandResult::BadFormat;
-      bot->sendTeamCallout (lines[lineText[0] - '0']);
+      bot->sendAddressedReply (lines[lineText[0] - '0'], true, true);
       msg ("AI dead chat requested for team.");
    }
    else if (intent == "chat") {
@@ -432,7 +432,40 @@ int BotControl::cmdAi () {
          || bot->m_commsStyle == CommsStyle::RadioOnly) return BotCommandResult::BadFormat;
       const auto channel = arg <StringRef> (argument);
       if (channel != "team" && channel != "all") return BotCommandResult::BadFormat;
-      const auto line = arg <StringRef> (argument + 1);
+      auto lineArg = argument + 1;
+      const auto recipientText = arg <StringRef> (lineArg);
+      bool addressed = hasArg (lineArg + 1) && !recipientText.empty () && recipientText.length () <= 2;
+      for (const char *p = recipientText.chars (); addressed && *p; ++p) {
+         if (*p < '0' || *p > '9') addressed = false;
+      }
+      if (addressed) {
+         const int recipientSlot = recipientText.as <int> ();
+         if (recipientSlot >= kGameMaxPlayers) return BotCommandResult::BadFormat;
+         auto *recipient = game.playerOfIndex (recipientSlot);
+         if (!game.isPlayerEntity (recipient) || game.isFakeClientEntity (recipient)) {
+            msg ("AI chat skipped: player left.");
+            return BotCommandResult::Handled;
+         }
+         const auto recipientAlive = game.isAliveEntity (recipient);
+         const auto recipientTeam = game.getRealPlayerTeam (recipient);
+         if (bot->m_isAlive != recipientAlive || (channel == "team" && bot->m_team != recipientTeam)) {
+            Bot *replacement = nullptr;
+            for (const auto &candidate : bots) {
+               if (candidate->m_commsStyle == CommsStyle::RadioOnly
+                  || candidate->m_isAlive != recipientAlive
+                  || (channel == "team" && candidate->m_team != recipientTeam)) continue;
+               replacement = candidate.get ();
+               break;
+            }
+            if (!replacement) {
+               msg ("AI chat skipped: no visible bot available.");
+               return BotCommandResult::Handled;
+            }
+            bot = replacement;
+         }
+         ++lineArg;
+      }
+      const auto line = arg <StringRef> (lineArg);
       if (line.empty () || line.length () > 30) return BotCommandResult::BadFormat;
       for (const char *p = line.chars (); *p; ++p) {
          const bool safe = (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9')
@@ -440,7 +473,9 @@ int BotControl::cmdAi () {
             || *p == '\'' || *p == '-';
          if (!safe) return BotCommandResult::BadFormat;
       }
-      bot->sendAddressedReply (line, channel == "team");
+      bot->sendAddressedReply (line, channel == "team", true);
+      logger.message ("[YaPB ai] chat dispatched bot=%d channel=%s alive=%d", bot->m_index,
+         channel.chars (), bot->m_isAlive ? 1 : 0);
       msg ("AI chat requested.");
    }
    else {

@@ -37,15 +37,18 @@ def to_command(payload: object) -> str:
             raise ValueError("dead_chat line must be 0, 1, or 2")
         return f"yb ai {bot} dead_chat {line}"
     if action == "chat":
-        if set(payload) != {"action", "bot_slot", "channel", "text"}:
-            raise ValueError("chat requires only action, bot_slot, channel, text")
+        allowed = {"action", "bot_slot", "channel", "text", "player_slot"}
+        if not {"action", "bot_slot", "channel", "text"} <= set(payload) or set(payload) - allowed:
+            raise ValueError("chat requires action, bot_slot, channel, text, optional player_slot")
         channel = payload["channel"]
         line = payload["text"]
         if channel not in ("team", "all") or not isinstance(line, str):
             raise ValueError("invalid chat channel or text")
         if not 1 <= len(line) <= 30 or not re.fullmatch(r"[a-z0-9 .,?!'-]+", line):
             raise ValueError("chat text must be lowercase, safe, and at most 30 characters")
-        return f'yb ai {bot} chat {channel} "{line}"'
+        recipient = (f" {slot(payload['player_slot'], 'player_slot')}"
+                     if "player_slot" in payload else "")
+        return f'yb ai {bot} chat {channel}{recipient} "{line}"'
     raise ValueError("unsupported action")
 
 

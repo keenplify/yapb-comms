@@ -969,6 +969,15 @@ void Bot::pushRadioMessage (int message) {
    if (cv_radio_mode.as <int> () == 0 || m_numFriendsLeft == 0 || m_isCreature) {
       return;
    }
+   if (message == Radio::SectorClear) {
+      // A generic goal visit does not establish that an entire sector is safe.
+      // During a CT bomb search, several bots can reject nodes in one second;
+      // report that at most once per team every 30 seconds.
+      if (m_team != Team::CT || !gameState.isBombPlanted ()) return;
+      static float nextSectorClear = 0.0f;
+      if (game.time () < nextSectorClear && nextSectorClear - game.time () < 30.0f) return;
+      nextSectorClear = game.time () + 30.0f;
+   }
    const bool chatReady = m_lastTacticalChatTime <= 0.0f || m_lastTacticalChatTime + 10.0f <= game.time ();
    const bool useChat = (m_commsStyle == CommsStyle::ChatOnly && chatReady)
       || (m_commsStyle == CommsStyle::Both && (++m_commsSequence % 2 == 0) && chatReady);
