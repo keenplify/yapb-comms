@@ -17,6 +17,7 @@ ConVar cv_jasonmode ("jasonmode", "0", "If enabled, all bots will be forced to u
 ConVar cv_radio_mode ("radio_mode", "1", "Allows bots to use radio or chatter.\nAllowed values: '0', '1', '2'.\nIf '0', radio and chatter is disabled.\nIf '1', only radio allowed.\nIf '2' chatter and radio allowed.", true, 0.0f, 2.0f);
 ConVar cv_bhop ("bhop", "1", "Allows occasional difficulty-scaled bunny-hop bursts outside combat.");
 ConVar cv_bhop_test ("bhop_test", "0", "Debug only: bhop on every eligible movement opportunity. Disable after testing.", true, 0.0f, 1.0f);
+ConVar cv_ground_strafe_test ("ground_strafe_test", "0", "Debug only: pulse crouch and side movement on safe ground routes. Requires a high server tick rate.", true, 0.0f, 1.0f);
 
 ConVar cv_economics_rounds ("economics_rounds", "1", "Specifies whether bots are able to use team economics, like not buying any weapons for the whole team to keep money for better guns.");
 ConVar cv_economics_disrespect_percent ("economics_disrespect_percent", "25", "Allows bots to ignore economics and buy weapons with disrespect to economics.", true, 0.0f, 100.0f);
@@ -4143,6 +4144,7 @@ void Bot::runMovement () {
       m_requestedJump = false;
    }
    tryBhop ();
+   tryGroundStrafe ();
 
    engfuncs.pfnRunPlayerMove (ent (),
       getRpmAngles (), m_moveSpeed, m_strafeSpeed,
@@ -4177,13 +4179,14 @@ void Bot::tryBhop () {
       selectWeaponById (Weapon::Knife);
       m_nextBhopKnifeSwitchTime = game.time () + 1.0f;
    }
-   // In the forced diagnostic mode, add limited side input while airborne.
+   // Add limited side input during a hop chain while airborne.
    // Keep the route in front of the bot; strong lateral input made navigation
    // turn back toward the path after each jump and killed its forward speed.
-   if (forceBhop && safeContext && !grounded
-      && !(m_pathFlags & (NodeFlag::Crouch | NodeFlag::Ladder))
+   if ((forceBhop || m_bhopJumpsLeft > 0) && safeContext && !grounded
+      && !(m_pathFlags & (NodeFlag::Crouch | NodeFlag::Ladder | NodeFlag::Lift | NodeFlag::Button | NodeFlag::Narrow | NodeFlag::Goal))
       && !(m_currentTravelFlags & PathFlag::Jump)
-      && m_destOrigin.distanceSq2d (pev->origin) > cr::sqrf (96.0f)
+      && cr::abs (m_strafeSpeed) < 1.0f
+      && m_destOrigin.distanceSq2d (pev->origin) > cr::sqrf (160.0f)
       && pev->velocity.length2d () > 180.0f) {
       const auto right = m_moveAngles.right ().get2d ();
       const float lateralSpeed = pev->velocity | right;
@@ -4192,21 +4195,32 @@ void Bot::tryBhop () {
       if (forwardSpeed > pev->velocity.length2d () * 0.8f) {
          const int side = lateralSpeed > 25.0f ? -1 : lateralSpeed < -25.0f ? 1
             : (static_cast <int> (game.time () * 6.0f) & 1) ? 1 : -1;
-         m_moveSpeed = pev->maxspeed * 0.85f;
-         m_strafeSpeed = pev->maxspeed * 0.35f * static_cast <float> (side);
+         m_moveSpeed = pev->maxspeed * (forceBhop ? 0.85f : 0.95f);
+         m_strafeSpeed = pev->maxspeed * (forceBhop ? 0.35f : 0.18f) * static_cast <float> (side);
       }
    }
+   const bool downhill = m_destOrigin.z + 24.0f < pev->origin.z;
    const bool readyOnGround = !isDucking ()
-      && !(m_pathFlags & (NodeFlag::Crouch | NodeFlag::Ladder))
+      && !(m_pathFlags & (NodeFlag::Crouch | NodeFlag::Ladder | NodeFlag::Lift | NodeFlag::Button | NodeFlag::Narrow | NodeFlag::Goal))
       && !(m_currentTravelFlags & PathFlag::Jump)
+      && cr::abs (m_strafeSpeed) < 1.0f
+      && m_destOrigin.distanceSq2d (pev->origin) > cr::sqrf (m_bhopJumpsLeft > 0 ? 48.0f : downhill ? 64.0f : 96.0f)
       && pev->maxspeed >= 180.0f && m_moveSpeed > pev->maxspeed * 0.6f
       && pev->velocity.length2d () > 190.0f;
 
    const bool justLanded = grounded && !m_bhopWasGrounded;
    m_bhopWasGrounded = grounded;
-   if (!safeContext || (grounded && !readyOnGround)) {
+   if (justLanded && m_bhopJumpsLeft > 0) {
+      m_bhopLandingWindowEndTime = game.time () + 0.12f;
+   }
+   if (!safeContext) {
       m_bhopJumpsLeft = 0;
       if (fighting) m_nextBhopBurstTime = game.time () + 5.0f;
+      return;
+   }
+   if (grounded && !readyOnGround) {
+      if (m_bhopJumpsLeft > 0 && m_bhopLandingWindowEndTime > game.time ()) return;
+      m_bhopJumpsLeft = 0;
       return;
    }
    if (m_bhopReleaseJump && grounded && m_jumpTime + 0.3f < game.time ()) {
@@ -4215,13 +4229,15 @@ void Bot::tryBhop () {
    }
    if (!grounded || (pev->button & IN_JUMP) || (m_oldButtons & IN_JUMP)) return;
 
-   const bool continuing = m_bhopJumpsLeft > 0 && justLanded;
-   const bool starting = forceBhop || (m_bhopJumpsLeft == 0 && m_nextBhopBurstTime <= game.time ()
+   const bool continuing = m_bhopJumpsLeft > 0 && m_bhopLandingWindowEndTime > game.time ();
+   const bool starting = forceBhop || (m_bhopJumpsLeft == 0
+      && (m_nextBhopBurstTime <= game.time () || (downhill && m_nextBhopBurstTime - game.time () < 2.0f))
       && m_jumpTime + 1.2f < game.time ());
    if (!continuing && !starting) return;
 
    const int difficulty = cr::clamp (m_difficulty, 0, 4);
-   const int chance = forceBhop ? 100 : continuing ? bhopContinueChance (difficulty) : bhopStartChance (difficulty);
+   const int chance = forceBhop ? 100 : continuing ? bhopContinueChance (difficulty)
+      : downhill ? cr::max (90, bhopStartChance (difficulty)) : bhopStartChance (difficulty);
    if (!rg.chance (chance)) {
       if (continuing) m_bhopJumpsLeft = 0;
       else m_nextBhopBurstTime = game.time () + rg (3.0f, 5.0f);
@@ -4238,11 +4254,76 @@ void Bot::tryBhop () {
    }
    else {
       m_bhopJumpsLeft = bhopBurstLength (difficulty) - 1;
-      m_nextBhopBurstTime = game.time () + rg (8.0f, 14.0f);
+      m_nextBhopBurstTime = game.time () + rg (5.0f, 8.0f);
    }
    pev->button |= IN_JUMP;
    m_jumpTime = game.time ();
+   m_lastBhopPressTime = game.time ();
    m_bhopReleaseJump = true;
+   m_bhopLandingWindowEndTime = 0.0f;
+   ++m_bhopJumpPresses;
+}
+
+void Bot::tryGroundStrafe () {
+   const auto task = getCurrentTaskId ();
+   const bool fighting = (!game.isNullEntity (m_enemy)
+      && game.isAliveEntity (m_enemy) && m_seeEnemyTime + 2.0f > game.time ())
+      || (m_states & Sense::SeeingEnemy)
+      || task == Task::Attack || task == Task::SeekCover || task == Task::Hide;
+   const bool moving = task == Task::Normal || task == Task::MoveToPosition || task == Task::FollowUser;
+   const auto route = (m_destOrigin - pev->origin).get2d ();
+   const float routeSpeed = pev->velocity | route.normalize2d_apx ();
+   const bool eligible = cv_ground_strafe_test && m_isAlive && !m_isCreature && !m_notStarted
+      && !fighting && moving && !m_isStuck && !m_hasProgressBar && !m_hasHostage && !m_hasC4
+      && isOnFloor () && !isOnLadder () && !isInWater ()
+      && m_currentNodeIndex != kInvalidNodeIndex
+      && !(m_pathFlags & (NodeFlag::Crouch | NodeFlag::Ladder | NodeFlag::Lift | NodeFlag::Button | NodeFlag::Narrow | NodeFlag::Goal))
+      && !(m_currentTravelFlags & PathFlag::Jump)
+      && m_bhopJumpsLeft == 0
+      && m_nextBhopBurstTime - game.time () > 0.75f
+      && !(pev->button & (IN_DUCK | IN_JUMP)) && m_duckTime < game.time ()
+      && cr::abs (m_strafeSpeed) < 1.0f
+      && cr::abs (m_destOrigin.z - pev->origin.z) < 24.0f
+      && pev->maxspeed >= 180.0f && m_moveSpeed > pev->maxspeed * 0.6f
+      && pev->velocity.length2d () > 190.0f
+      && routeSpeed > pev->velocity.length2d () * 0.9f
+      && route.lengthSq2d () > cr::sqrf (192.0f);
+
+   if (!eligible) {
+      m_groundStrafeDuckPulse = false;
+      if (m_groundStrafeBurstEndTime > game.time ()) {
+         m_nextGroundStrafeBurstTime = game.time () + rg (3.0f, 5.0f);
+      }
+      m_groundStrafeBurstEndTime = 0.0f;
+      return;
+   }
+   if (m_groundStrafeBurstEndTime <= game.time ()) {
+      m_groundStrafeDuckPulse = false;
+      if (m_nextGroundStrafeBurstTime > game.time ()) return;
+      m_groundStrafeBurstEndTime = game.time () + rg (0.25f, 0.45f);
+      m_nextGroundStrafeBurstTime = m_groundStrafeBurstEndTime + rg (3.0f, 6.0f);
+   }
+   if (m_currentWeapon >= 0 && m_currentWeapon < 32
+      && (cr::bit (m_currentWeapon) & (kPrimaryWeaponMask | kSecondaryWeaponMask))
+      && m_nextBhopKnifeSwitchTime <= game.time ()) {
+      selectWeaponById (Weapon::Knife);
+      m_nextBhopKnifeSwitchTime = game.time () + 1.0f;
+   }
+   // One command presses crouch, the next releases it. GoldSrc receives
+   // distinct button edges; a held crouch merely slows the bot down.
+   if (m_groundStrafeDuckPulse) {
+      m_groundStrafeDuckPulse = false;
+      return;
+   }
+   const auto right = m_moveAngles.right ().get2d ();
+   const float lateralSpeed = pev->velocity | right;
+   const int side = lateralSpeed > 20.0f ? -1 : lateralSpeed < -20.0f ? 1 : m_groundStrafeSide;
+   m_groundStrafeSide = -side;
+   m_strafeSpeed = pev->maxspeed * 0.12f * static_cast <float> (side);
+   pev->button |= IN_DUCK;
+   m_groundStrafeDuckPulse = true;
+   ++m_groundStrafePulses;
+   m_groundStrafePeakSpeed = cr::max (m_groundStrafePeakSpeed, pev->velocity.length2d ());
 }
 
 bool Bot::requestJump () {

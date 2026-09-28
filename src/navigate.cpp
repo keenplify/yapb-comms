@@ -1056,7 +1056,7 @@ void Bot::translateInput () {
       m_jumpTime = game.time ();
    }
 
-   if (m_jumpTime + 0.85f > game.time ()) {
+   if (m_bhopJumpsLeft == 0 && m_jumpTime + 0.85f > game.time ()) {
       if (!isOnFloor () && !isInWater () && !isOnLadder ()) {
          pev->button |= IN_DUCK;
       }
@@ -1410,7 +1410,25 @@ bool Bot::updateNavigation () {
       return true;
    }
 
-   if (nodeDistanceSq < desiredDistanceSq) {
+   // A fast hop can pass above an ordinary waypoint without ever entering
+   // its small 3D radius. If the node is now behind us and the next node is
+   // ahead, advance instead of turning back and discarding the momentum.
+   bool passedNodeDuringHop = false;
+   if (m_pathWalk.hasNext () && graph.exists (m_pathWalk.next ())
+      && !pathHasFlags && m_lostReachableNodeTimer.elapsed () && m_repathTimer.elapsed ()
+      && !(m_pathFlags & (NodeFlag::Crouch | NodeFlag::Ladder | NodeFlag::Lift | NodeFlag::Button
+         | NodeFlag::Narrow | NodeFlag::Goal | NodeFlag::Camp | NodeFlag::DoubleJump | NodeFlag::Rescue))
+      && m_lastBhopPressTime > 0.0f && m_lastBhopPressTime + 1.0f > game.time ()
+      && pev->velocity.length2d () > 190.0f
+      && m_pathOrigin.distanceSq2d (pev->origin) < cr::sqrf (128.0f)
+      && cr::abs (m_pathOrigin.z - pev->origin.z) < 112.0f) {
+      const auto velocity = pev->velocity.get2d ();
+      const auto toNode = (m_pathOrigin - pev->origin).get2d ();
+      const auto toNext = (graph[m_pathWalk.next ()].origin - pev->origin).get2d ();
+      passedNodeDuringHop = (toNode | velocity) <= 0.0f && (toNext | velocity) > 0.0f;
+   }
+
+   if (nodeDistanceSq < desiredDistanceSq || passedNodeDuringHop) {
       // did we reach a destination node?
       if (getTask ()->data == m_currentNodeIndex) {
          if (m_chosenGoalIndex != kInvalidNodeIndex) {

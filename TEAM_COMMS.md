@@ -241,12 +241,23 @@ pick a new goal, and its defend-node search could fail from far away.
 ## Movement personality
 
 `yb_bhop 1` enables occasional bunny-hop bursts while a bot is running a
-normal navigation, move, or follow task. A burst has at most two jumps on
-lower difficulties and three on Hard/Expert, followed by an 8–14 second
+normal navigation, move, or follow task. A burst has at most three jumps on
+lower difficulties, four on Normal, and five on Hard/Expert, followed by a 5–8 second
 cooldown. The chance to start and continue a burst increases from Noob to
 Expert. Combat, recent enemy sightings, crouch/ladder paths, water, bomb or
 hostage handling, and low movement speed cancel or suppress it. Set
 `yb_bhop 0` in the existing server config to disable it.
+Downhill routes can start a burst earlier, and follow-up hops get a short
+landing window without the automatic midair crouch. Active chains use small
+side input in the air when the next waypoint is far enough ahead.
+Ground strafing is disabled by default (`yb_ground_strafe_test 0`). When enabled for testing, bots pulse
+crouch and use modest side input in short bursts, with a few seconds between
+bursts. They pause near waypoints, turns, elevation changes, and special
+routes so navigation keeps control. Bunny-hop bursts remain enabled separately. Diagnostics log pulse count, peak ground
+speed, and frame time as `[YaPB ground-strafe]` every five seconds when
+`yb_comms_debug 1` is enabled. Speed gains depend on the server's frame rate
+and GoldSrc physics. Set `yb_ground_strafe_test 0` to disable it. Combat and
+objective safety checks still apply.
 Normal bhop also avoids a blocked path ahead. For diagnosis, `yb_bhop_test 1`
 forces a jump at every eligible movement opportunity and bypasses that wall
 check. While airborne, it applies alternating side input to build speed

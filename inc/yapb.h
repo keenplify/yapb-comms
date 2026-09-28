@@ -487,6 +487,7 @@ private:
    void update ();
    void runMovement ();
    void tryBhop ();
+   void tryGroundStrafe ();
    void checkSpawnConditions ();
    void buyStuff ();
    void checkMsgQueue ();
@@ -691,8 +692,17 @@ public:
    float m_nextBhopBurstTime {}; // next optional burst window
    float m_nextBhopKnifeSwitchTime {}; // throttle diagnostic knife draw
    int m_bhopJumpsLeft {}; // bounded burst, never continuous
+   float m_lastBhopPressTime {};
+   float m_bhopLandingWindowEndTime {};
+   int m_bhopJumpPresses {}; // diagnostic count since last sample
    bool m_bhopWasGrounded { true };
    bool m_bhopReleaseJump {}; // release jump while airborne
+   bool m_groundStrafeDuckPulse {}; // release crouch on the next movement command
+   float m_groundStrafeBurstEndTime {};
+   float m_nextGroundStrafeBurstTime {};
+   int m_groundStrafeSide { 1 };
+   int m_groundStrafePulses {};
+   float m_groundStrafePeakSpeed {};
    bool m_textOrder {}; // deterministic human team-chat order
    int m_prevGoalIndex {}; // holds destination goal node
    int m_chosenGoalIndex {}; // used for experience, same as above

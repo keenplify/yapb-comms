@@ -7,6 +7,8 @@
 
 #include <yapb.h>
 
+extern ConVar cv_comms_debug;
+
 ConVar cv_display_menu_text ("display_menu_text", "1", "Enables or disables display menu text, when players asks for menu. Useful only for Android.", true, 0.0f, 1.0f, Var::Xash3D);
 ConVar cv_password ("password", "", "The value (password) for the setinfo key. If the user sets the correct password, he gains access to bot commands and menus.", false, 0.0f, 0.0f, Var::Password);
 ConVar cv_password_key ("password_key", "_ybpw", "The name of the setinfo key used to store the password for bot commands and menus.", false);
@@ -474,8 +476,10 @@ int BotControl::cmdAi () {
          if (!safe) return BotCommandResult::BadFormat;
       }
       bot->sendAddressedReply (line, channel == "team", true);
-      logger.message ("[YaPB ai] chat dispatched bot=%d channel=%s alive=%d", bot->m_index,
-         channel.chars (), bot->m_isAlive ? 1 : 0);
+      if (cv_comms_debug) {
+         logger.message ("[YaPB ai] chat dispatched bot=%d channel=%s alive=%d", bot->m_index,
+            channel.chars (), bot->m_isAlive ? 1 : 0);
+      }
       msg ("AI chat requested.");
    }
    else {

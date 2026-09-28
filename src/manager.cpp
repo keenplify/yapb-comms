@@ -698,12 +698,20 @@ void BotManager::maintainCaptains () {
          const int slot = bot->m_index;
          const auto task = bot->getCurrentTaskId ();
          if (!speedReported && bot->m_moveSpeed > 50.0f) {
-            logger.message ("[YaPB bhop] bot=%d speed=%.0f max=%.0f weapon=%d jumps=%d task=%d enemy=%d seen=%.0f sense=%d stuck=%d c4=%d",
+            logger.message ("[YaPB bhop] bot=%d speed=%.0f max=%.0f weapon=%d jumps_left=%d presses=%d task=%d enemy=%d seen=%.0f sense=%d stuck=%d c4=%d",
                slot, bot->pev->velocity.length2d (), bot->pev->maxspeed,
-               bot->m_currentWeapon, bot->m_bhopJumpsLeft, static_cast <int> (task),
+               bot->m_currentWeapon, bot->m_bhopJumpsLeft, bot->m_bhopJumpPresses, static_cast <int> (task),
                !game.isNullEntity (bot->m_enemy), game.time () - bot->m_seeEnemyTime,
                bot->m_states, bot->m_isStuck, bot->m_hasC4);
+            bot->m_bhopJumpPresses = 0;
             speedReported = true;
+         }
+         if (bot->m_groundStrafePulses > 0) {
+            logger.message ("[YaPB ground-strafe] bot=%d pulses=%d peak=%.0f now=%.0f max=%.0f frame=%.1fms",
+               slot, bot->m_groundStrafePulses, bot->m_groundStrafePeakSpeed,
+               bot->pev->velocity.length2d (), bot->pev->maxspeed, bot->m_frameInterval * 1000.0f);
+            bot->m_groundStrafePulses = 0;
+            bot->m_groundStrafePeakSpeed = 0.0f;
          }
          if (bot->pev->origin.distanceSq (m_debugBotOrigin[slot]) > cr::sqrf (64.0f)) {
             m_debugBotOrigin[slot] = bot->pev->origin;
@@ -2226,8 +2234,17 @@ void Bot::newRound () {
    m_nextBhopBurstTime = game.time () + rg (4.0f, 8.0f);
    m_nextBhopKnifeSwitchTime = 0.0f;
    m_bhopJumpsLeft = 0;
+   m_lastBhopPressTime = 0.0f;
+   m_bhopLandingWindowEndTime = 0.0f;
+   m_bhopJumpPresses = 0;
    m_bhopWasGrounded = true;
    m_bhopReleaseJump = false;
+   m_groundStrafeDuckPulse = false;
+   m_groundStrafeBurstEndTime = 0.0f;
+   m_nextGroundStrafeBurstTime = game.time () + rg (2.0f, 4.0f);
+   m_groundStrafeSide = 1;
+   m_groundStrafePulses = 0;
+   m_groundStrafePeakSpeed = 0.0f;
 
    m_pathOrigin.clear ();
    m_destOrigin.clear ();

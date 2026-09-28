@@ -6,6 +6,7 @@ int main () {
       assert (bhopStartChance (difficulty) > bhopStartChance (difficulty - 1));
       assert (bhopContinueChance (difficulty) > bhopContinueChance (difficulty - 1));
    }
-   assert (bhopBurstLength (0) == 2);
-   assert (bhopBurstLength (4) == 3);
+   assert (bhopBurstLength (0) == 3);
+   assert (bhopBurstLength (2) == 4);
+   assert (bhopBurstLength (4) == 5);
 }
