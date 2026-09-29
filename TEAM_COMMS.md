@@ -230,6 +230,14 @@ or `ace!!`. Reactions are delayed briefly so a rapid streak is reported at
 its highest count. These lines have the same chat cooldown and require a
 living chat-capable teammate.
 
+When a human opponent kills a chat-capable bot, that dead bot now has an
+occasional all-chat reaction. The reaction includes the live score and match
+target so AI rephrasing stays grounded: normal 5v5 and unrated matches use the
+MR12 first-to-13 target, while FFA uses first-to-90 and the bot/killer frag
+scores. Bots become more likely to sound frustrated when trailing badly or
+facing match point. Bot-vs-bot deaths do not trigger this opponent banter, and
+a global cooldown prevents death-chat spam.
+
 After a bomb plant, living Terrorist bots more than 700 units from the planted
 site now interrupt stale routes and head to a nearby YaPB graph node at the
 bomb. They wait for active combat to end, need enough bomb time to make the
