@@ -400,6 +400,31 @@ bool Bot::lookupEnemies () {
    m_enemyParts = Visibility::None;
    m_enemyOrigin.clear ();
 
+   // Spawn-protected players may already be cached as the current or last
+   // enemy from the frame before FL_NOTARGET was applied. Drop that knowledge
+   // immediately instead of waiting for normal visibility refresh timers.
+   if (!game.isNullEntity (m_enemy) && isEnemyNoTarget (m_enemy)) {
+      if (m_lastEnemy == m_enemy) {
+         m_lastEnemy = nullptr;
+         m_lastEnemyOrigin.clear ();
+      }
+      m_enemy = nullptr;
+      m_enemyBodyPartSet = nullptr;
+      m_states &= ~(Sense::SeeingEnemy | Sense::SuspectEnemy);
+      m_aimFlags &= ~(AimFlags::Enemy | AimFlags::LastEnemy);
+      m_wantsToFire = false;
+      m_shootAtDeadTime = 0.0f;
+   }
+
+   if (!game.isNullEntity (m_lastEnemy) && isEnemyNoTarget (m_lastEnemy)) {
+      m_lastEnemy = nullptr;
+      m_lastEnemyOrigin.clear ();
+      m_states &= ~Sense::SuspectEnemy;
+      m_aimFlags &= ~AimFlags::LastEnemy;
+      m_wantsToFire = false;
+      m_shootAtDeadTime = 0.0f;
+   }
+
    // do not search for enemies while we're blinded, or shooting disabled by user
    if (m_enemyIgnoreTimer > game.time () || m_blindTime > game.time () || cv_ignore_enemies) {
       return false;
@@ -1253,8 +1278,25 @@ void Bot::handleWeapons (float distance, int, int id, int choosen) {
 }
 
 void Bot::doFireWeapons () {
-   // the bots wants to fire at something?
+   // Spawn protection can begin between enemy lookup and this firing frame.
+   // Never fire at a player carrying FL_NOTARGET, even if an old attack task
+   // or aim vector is still queued.
+   if ((!game.isNullEntity (m_enemy) && isEnemyNoTarget (m_enemy))
+      || (game.isNullEntity (m_enemy) && !game.isNullEntity (m_lastEnemy) && isEnemyNoTarget (m_lastEnemy))) {
+      m_enemy = nullptr;
+      m_lastEnemy = nullptr;
+      m_enemyBodyPartSet = nullptr;
+      m_enemyOrigin.clear ();
+      m_lastEnemyOrigin.clear ();
+      m_states &= ~(Sense::SeeingEnemy | Sense::SuspectEnemy);
+      m_aimFlags &= ~(AimFlags::Enemy | AimFlags::LastEnemy);
+      m_wantsToFire = false;
+      m_shootAtDeadTime = 0.0f;
+      pev->button &= ~(IN_ATTACK | IN_ATTACK2);
+      return;
+   }
 
+   // the bots wants to fire at something?
    if (m_shootAtDeadTime > game.time () || (m_wantsToFire && !m_isUsingGrenade && m_shootTime <= game.time ())) {
       fireWeapons (); // if bot didn't fire a bullet try again next frame
    }
