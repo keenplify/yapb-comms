@@ -1664,9 +1664,10 @@ void Bot::buyStuff () {
       }
       break;
 
-   case BuyState::DefusalKit: // if bot is CT and we're on a bomb map, randomly buy the defuse kit
+   case BuyState::DefusalKit: // CTs should not burn kit money during a deliberate team eco
       if (game.mapIs (MapFlags::Demolition)
          && m_team == Team::CT
+         && teamHasGoodEconomics
          && rg.chance (80)
          && m_moneyAmount > 200
          && !isWeaponRestricted (Weapon::Defuser)) {
