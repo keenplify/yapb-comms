@@ -2837,30 +2837,9 @@ void Bot::checkRadioQueue () {
             if (tid == Task::Pause) {
                getTask ()->time = game.time ();
             }
+            // A fallback order changes movement only. It must not reveal the
+            // nearest hidden enemy around the player who issued the radio call.
             m_targetEntity = nullptr;
-            m_seeEnemyTime = game.time ();
-
-            // if bot has no enemy
-            if (m_lastEnemyOrigin.empty ()) {
-               float nearestDistanceSq = kInfiniteDistance;
-
-               // take nearest enemy to ordering player
-               for (const auto &client : util.getClients ()) {
-                  if (!(client.flags & ClientFlags::Used) || !(client.flags & ClientFlags::Alive) || client.team == m_team) {
-                     continue;
-                  }
-
-                  auto enemy = client.ent;
-                  const float currentDistanceSq = m_radioEntity->v.origin.distanceSq (enemy->v.origin);
-
-                  if (currentDistanceSq < nearestDistanceSq) {
-                     nearestDistanceSq = currentDistanceSq;
-
-                     m_lastEnemy = enemy;
-                     m_lastEnemyOrigin = enemy->v.origin;
-                  }
-               }
-            }
             clearSearchNodes ();
          }
       }
@@ -3022,30 +3001,9 @@ void Bot::checkRadioQueue () {
                getTask ()->time = game.time ();
             }
 
+            // Holding a position must not query enemy entities around the
+            // ordering player. Visual acquisition still happens normally.
             m_targetEntity = nullptr;
-            m_seeEnemyTime = game.time ();
-
-            // if bot has no enemy
-            if (m_lastEnemyOrigin.empty ()) {
-               float nearestDistanceSq = kInfiniteDistance;
-
-               // take nearest enemy to ordering player
-               for (const auto &client : util.getClients ()) {
-                  if (!(client.flags & ClientFlags::Used) || !(client.flags & ClientFlags::Alive) || client.team == m_team) {
-                     continue;
-                  }
-
-                  auto enemy = client.ent;
-                  const float enemyDistanceSq = m_radioEntity->v.origin.distanceSq (enemy->v.origin);
-
-                  if (enemyDistanceSq < nearestDistanceSq) {
-                     nearestDistanceSq = enemyDistanceSq;
-
-                     m_lastEnemy = enemy;
-                     m_lastEnemyOrigin = enemy->v.origin;
-                  }
-               }
-            }
             clearSearchNodes ();
 
             const int index = findDefendNode (m_radioEntity->v.origin);
@@ -3814,11 +3772,29 @@ void Bot::takeDamage (edict_t *inflictor, int damage, int armor, int bits) {
          clearTask (Task::Camp);
 
          if (game.isNullEntity (m_enemy) && m_team != inflictorTeam) {
-            m_lastEnemy = inflictor;
-            m_lastEnemyOrigin = inflictor->v.origin;
+            if (seesEnemy (inflictor)) {
+               m_enemy = inflictor;
+               m_lastEnemy = inflictor;
+               m_enemyOrigin = inflictor->v.origin;
+               m_lastEnemyOrigin = m_enemyOrigin;
+               m_seeEnemyTime = game.time ();
+               m_states |= Sense::SeeingEnemy;
+            }
+            else {
+               // Damage reveals only an approximate source direction. Do not
+               // turn the attacker into a visible target through a wall.
+               auto estimate = inflictor->v.origin;
+               const float distance = estimate.distance (pev->origin);
+               const float error = cr::clamp (distance * 0.12f, 48.0f, 192.0f);
+               estimate.x += rg (-error, error);
+               estimate.y += rg (-error, error);
 
-            // FIXME - Bot doesn't necessary sees this enemy
-            m_seeEnemyTime = game.time ();
+               m_lastEnemy = inflictor;
+               m_lastEnemyOrigin = estimate;
+               m_heardSoundTime = game.time ();
+               m_states |= (Sense::SuspectEnemy | Sense::HearingEnemy);
+               m_aimFlags &= ~AimFlags::Enemy;
+            }
          }
 
          if (!game.is (GameFlags::CSDM)) {
@@ -4399,11 +4375,12 @@ void Bot::updateHearing () {
    }
    m_hearedEnemy = nullptr;
    float nearestDistanceSq = kInfiniteDistance;
+   Vector heardOrigin {};
 
-   // setup potential visibility set from engine
+   // PVS is only a cheap candidate filter for sound. It is never treated as
+   // proof that the bot can see the player.
    auto set = game.getVisibilitySet (this, false);
 
-   // loop through all enemy clients to check for hearable stuff
    for (const auto &client : util.getClients ()) {
       if (!(client.flags & ClientFlags::Used)
          || !(client.flags & ClientFlags::Alive)
@@ -4411,11 +4388,9 @@ void Bot::updateHearing () {
          || client.team2 == m_team
          || !client.ent
          || client.noise.last < game.time ()) {
-
          continue;
       }
 
-      // ignore invincible, no-target and not potentially visible players
       if (isEnemyInvincible (client.ent) || isEnemyNoTarget (client.ent) || !game.checkVisibility (client.ent, set)) {
          continue;
       }
@@ -4428,102 +4403,89 @@ void Bot::updateHearing () {
       if (distanceSq < nearestDistanceSq) {
          m_hearedEnemy = client.ent;
          nearestDistanceSq = distanceSq;
+         heardOrigin = client.noise.pos;
       }
    }
 
-   // did the bot hear someone ?
-   if (game.isPlayerEntity (m_hearedEnemy)) {
-      // change to best weapon if heard something
-      if (m_shootTime < game.time () - 5.0f
-         && isOnFloor ()
-         && m_currentWeapon != Weapon::C4
-         && m_currentWeapon != Weapon::Explosive
-         && m_currentWeapon != Weapon::Smoke
-         && m_currentWeapon != Weapon::Flashbang
-         && !isKnifeMode ()) {
+   if (!game.isPlayerEntity (m_hearedEnemy)) {
+      return;
+   }
 
-         selectBestWeapon ();
+   if (m_shootTime < game.time () - 5.0f
+      && isOnFloor ()
+      && m_currentWeapon != Weapon::C4
+      && m_currentWeapon != Weapon::Explosive
+      && m_currentWeapon != Weapon::Smoke
+      && m_currentWeapon != Weapon::Flashbang
+      && !isKnifeMode ()) {
+      selectBestWeapon ();
+   }
+
+   m_heardSoundTime = game.time ();
+   m_states |= Sense::HearingEnemy;
+
+   if (rg.chance (15) && game.isNullEntity (m_enemy) && game.isNullEntity (m_lastEnemy) && m_seeEnemyTime + 7.0f < game.time ()) {
+      pushChatterMessage (Chatter::HeardTheEnemy);
+   }
+
+   // Sound gives a noisy estimate at the position where the sound happened,
+   // not the enemy's continuously updated entity origin.
+   auto heardEstimate = heardOrigin;
+   const float heardDistance = cr::powf (nearestDistanceSq, 0.5f);
+   const float error = cr::clamp (heardDistance * 0.08f, 12.0f, 160.0f);
+   heardEstimate.x += rg (-error, error);
+   heardEstimate.y += rg (-error, error);
+
+   if (m_lastEnemyOrigin.empty () || game.isNullEntity (m_lastEnemy)) {
+      m_lastEnemy = m_hearedEnemy;
+      m_lastEnemyOrigin = heardEstimate;
+   }
+   else if (m_hearedEnemy == m_lastEnemy) {
+      if (m_states & Sense::SeeingEnemy) {
+         return;
       }
-
-      m_heardSoundTime = game.time ();
-      m_states |= Sense::HearingEnemy;
-
-      if (rg.chance (15) && game.isNullEntity (m_enemy) && game.isNullEntity (m_lastEnemy) && m_seeEnemyTime + 7.0f < game.time ()) {
-         pushChatterMessage (Chatter::HeardTheEnemy);
-      }
-
-      auto getHeardOriginWithError = [&] () -> Vector {
-         if (nearestDistanceSq > cr::sqrf (384.0f)) {
-            return m_hearedEnemy->v.origin;
-         }
-         auto error = kSprayDistance * cr::powf (nearestDistanceSq, 0.5f) / 2048.0f;
-         auto origin = m_hearedEnemy->v.origin;
-
-         origin.x = origin.x + rg (-error, error);
-         origin.y = origin.y + rg (-error, error);
-
-         return origin;
-      };
-
-      // didn't bot already have an enemy ? take this one...
-      if (m_lastEnemyOrigin.empty () || game.isNullEntity (m_lastEnemy)) {
+      m_lastEnemyOrigin = heardEstimate;
+   }
+   else {
+      const float oldDistanceSq = m_lastEnemyOrigin.distanceSq (pev->origin);
+      if (oldDistanceSq > heardOrigin.distanceSq (pev->origin) && m_seeEnemyTime + 1.0f < game.time ()) {
          m_lastEnemy = m_hearedEnemy;
-         m_lastEnemyOrigin = getHeardOriginWithError ();
+         m_lastEnemyOrigin = heardEstimate;
       }
-
-      // bot had an enemy, check if it's the heard one
       else {
-         if (m_hearedEnemy == m_lastEnemy) {
-            // bot sees enemy ? then bail out !
-            if (m_states & Sense::SeeingEnemy) {
-               return;
-            }
-            m_lastEnemyOrigin = getHeardOriginWithError ();
-         }
-         else if (m_hearedEnemy != nullptr) {
-            // if bot had an enemy but the heard one is nearer, take it instead
-            const float distanceSq = m_lastEnemyOrigin.distanceSq (pev->origin);
-
-            if (distanceSq > m_hearedEnemy->v.origin.distanceSq (pev->origin) && m_seeEnemyTime + 1.0f < game.time ()) {
-               m_lastEnemy = m_hearedEnemy;
-               m_lastEnemyOrigin = getHeardOriginWithError ();
-            }
-            else {
-               return;
-            }
-         }
+         return;
       }
+   }
 
-      // check if heard enemy can be seen
-      if (checkBodyPartsWithOffsets (m_hearedEnemy)) {
-         m_enemy = m_hearedEnemy;
-         m_lastEnemy = m_hearedEnemy;
-         m_lastEnemyOrigin = m_enemyOrigin;
+   // Hearing can suggest where to look, but only a real visual trace may
+   // promote the player to m_enemy / SeeingEnemy.
+   if (seesEnemy (m_hearedEnemy)) {
+      m_enemy = m_hearedEnemy;
+      m_lastEnemy = m_hearedEnemy;
+      m_lastEnemyOrigin = m_enemyOrigin;
+      m_states &= ~Sense::SuspectEnemy;
+      m_states |= Sense::SeeingEnemy;
+      m_aimFlags |= AimFlags::Enemy;
+      m_seeEnemyTime = game.time ();
+      return;
+   }
 
-         m_states |= Sense::SeeingEnemy;
-         m_seeEnemyTime = game.time ();
-      }
+   m_enemy = nullptr;
+   m_enemyBodyPartSet = nullptr;
+   m_states &= ~Sense::SeeingEnemy;
+   m_states |= Sense::SuspectEnemy;
+   m_aimFlags &= ~AimFlags::Enemy;
 
-      // check if heard enemy can be shoot through some obstacle
-      else {
-         if (cv_shoots_thru_walls
-            && m_lastEnemy == m_hearedEnemy
-            && rg.chance (m_difficultyData->hearThruPct)
-            && m_seeEnemyTime + 3.0f > game.time ()
-            && isPenetrableObstacle (m_hearedEnemy->v.origin)) {
-
-            m_enemy = m_hearedEnemy;
-            m_lastEnemy = m_hearedEnemy;
-            m_enemyOrigin = m_hearedEnemy->v.origin;
-            m_lastEnemyOrigin = m_hearedEnemy->v.origin;
-
-            m_states |= (Sense::SeeingEnemy | Sense::SuspectEnemy);
-            m_seeEnemyTime = game.time ();
-         }
-      }
+   // Optional wallbang logic can aim only at the noisy/frozen estimate.
+   // It never refreshes from the hidden player's live entity.
+   if (cv_shoots_thru_walls
+      && m_lastEnemy == m_hearedEnemy
+      && rg.chance (m_difficultyData->hearThruPct)
+      && m_seeEnemyTime + 3.0f > game.time ()
+      && isPenetrableObstacle (m_lastEnemyOrigin)) {
+      m_aimFlags |= AimFlags::LastEnemy;
    }
 }
-
 void Bot::enteredBuyZone (int buyState) {
    // this function is gets called when bot enters a buyzone, to allow bot to buy some stuff
 
