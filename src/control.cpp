@@ -418,6 +418,55 @@ int BotControl::cmdAi () {
       }
       msg ("AI jump queued.");
    }
+   else if (intent == "lead") {
+      if (!hasArg (argument) || !bot->m_isAlive || game.is (GameFlags::FreeForAll)
+         || gameState.isRoundOver () || gameState.isBombPlanted ()) {
+         return BotCommandResult::BadFormat;
+      }
+      const auto site = arg <StringRef> (argument);
+      if (site != "a" && site != "b") return BotCommandResult::BadFormat;
+
+      Vector sitePosition {};
+      if (!bots.findMapCallout (site == "a" ? "BombsiteA" : "BombsiteB", sitePosition)) {
+         msg ("AI lead rejected: site callout unavailable.");
+         return BotCommandResult::Handled;
+      }
+      const int siteNode = graph.getNearest (sitePosition, 512.0f);
+      if (siteNode == kInvalidNodeIndex) {
+         msg ("AI lead rejected: site graph node unavailable.");
+         return BotCommandResult::Handled;
+      }
+
+      int issued = 0;
+      for (const auto &candidate : bots) {
+         if (!candidate->m_isAlive || candidate->m_team != bot->m_team
+            || candidate->m_isCreature) continue;
+         const auto task = candidate->getCurrentTaskId ();
+         if (task == Task::PlantBomb || task == Task::DefuseBomb || candidate->m_hasHostage)
+            continue;
+         candidate->m_targetEntity = nullptr;
+         candidate->clearSearchNodes ();
+         candidate->m_position = graph[siteNode].origin;
+         candidate->m_pathType = FindPath::Fast;
+         candidate->m_agressionLevel = 1.0f;
+         candidate->m_fearLevel = 0.0f;
+         candidate->startTask (
+            Task::MoveToPosition,
+            TaskPri::MoveToPosition,
+            siteNode,
+            0.0f,
+            true
+         );
+         ++issued;
+      }
+      if (issued > 0) {
+         bot->sendTeamCallout (site == "a" ? "go a" : "go b");
+         msg ("AI leader route queued for %d bot(s).", issued);
+      }
+      else {
+         msg ("AI lead rejected: no available teammates.");
+      }
+   }
    else if (intent == "dead_chat") {
       if (bot->m_isAlive || bot->m_commsStyle == CommsStyle::RadioOnly) {
          msg ("AI dead chat rejected: bot is alive or radio-only.");
