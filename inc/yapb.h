@@ -437,6 +437,7 @@ private:
    bool checkBodyParts (edict_t *target);
    bool checkBodyPartsWithOffsets (edict_t *target);
    bool checkBodyPartsWithHitboxes (edict_t *target);
+   bool hasDirectLineOfSight (edict_t *player);
    bool seesEnemy (edict_t *player);
    bool hasActiveGoal ();
    bool advanceMovement ();
