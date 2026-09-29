@@ -2193,10 +2193,65 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
    // mark bot as "spawned", and reset it to new-round state when it dead (for csdm/zombie only)
    if (victimBot != nullptr) {
       victimBot->spawned ();
-
       victimBot->m_isAlive = false;
-      if (victimBot->m_commsStyle != CommsStyle::RadioOnly && rg.chance (25)) {
-         victimBot->m_pendingDeathLineTime = game.time () + rg (0.7f, 1.5f);
+      victimBot->m_pendingDeathLineTime = 0.0f;
+
+      // Opponent-facing death banter is reserved for human kills. It is
+      // deliberately sparse, score-aware, and globally throttled so a bot-heavy
+      // match never turns into chat spam.
+      const bool killedByHuman = game.isPlayerEntity (killer)
+         && !game.isFakeClientEntity (killer)
+         && killer != victim
+         && (game.is (GameFlags::FreeForAll)
+            || ((killerTeam == Team::CT || killerTeam == Team::Terrorist)
+               && (victimTeam == Team::CT || victimTeam == Team::Terrorist)
+               && killerTeam != victimTeam));
+
+      if (killedByHuman
+         && victimBot->m_commsStyle != CommsStyle::RadioOnly
+         && game.time () >= m_nextHumanKillChatTime) {
+         const int targetFromServer = static_cast <int> (engfuncs.pfnCVarGetFloat ("competitive_score_target"));
+         const int target = targetFromServer > 0 ? targetFromServer
+            : game.is (GameFlags::FreeForAll) ? 90 : 13;
+
+         int botScore = 0;
+         int humanScore = 0;
+         if (game.is (GameFlags::FreeForAll)) {
+            botScore = cr::max (0, static_cast <int> (victimBot->pev->frags));
+            humanScore = cr::max (0, static_cast <int> (killer->v.frags));
+         }
+         else {
+            const int scoreT = cr::max (0, static_cast <int> (engfuncs.pfnCVarGetFloat ("competitive_score_t")));
+            const int scoreCT = cr::max (0, static_cast <int> (engfuncs.pfnCVarGetFloat ("competitive_score_ct")));
+            botScore = victimTeam == Team::CT ? scoreCT : scoreT;
+            humanScore = killerTeam == Team::CT ? scoreCT : scoreT;
+         }
+
+         const int deficit = humanScore - botScore;
+         const bool matchPointPressure = humanScore >= target - 1 && botScore < humanScore;
+         const bool frustrated = botScore < humanScore
+            && (matchPointPressure || deficit >= 4 || rg.chance (35));
+         const int chance = frustrated ? 45 : 22;
+
+         if (rg.chance (chance)) {
+            constexpr const char *frustratedLines[] = { "come on", "bruh", "rough", "ugh" };
+            constexpr const char *normalLines[] = { "wp", "close", "ok ok", "not over" };
+            const char *mood = frustrated ? frustratedLines[rg (0, 3)] : normalLines[rg (0, 3)];
+
+            String line {};
+            line.assignf ("%d-%d first to %d, %s", botScore, humanScore, target, mood);
+
+            if (cv_ai_bridge && aiBridgeReady ()) {
+               logAiEvent (victimBot, nullptr, line, false, true);
+            }
+            else {
+               victimBot->sendAddressedReply (line, false, true);
+            }
+            m_nextHumanKillChatTime = game.time () + rg (7.0f, 13.0f);
+         }
+         else {
+            m_nextHumanKillChatTime = game.time () + rg (2.0f, 4.0f);
+         }
       }
    }
 
@@ -3500,6 +3555,7 @@ void BotManager::initRound () {
       m_killReactionTime[slot] = 0.0f;
    }
    m_nextFfaSpreeChatTime = 0.0f;
+   m_nextHumanKillChatTime = 0.0f;
    m_pendingOrderAcks.clear ();
    m_nextCommsDebugTime = 0.0f;
    for (int slot = 0; slot < kGameMaxPlayers; ++slot) {
