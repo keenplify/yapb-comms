@@ -73,6 +73,7 @@ private:
    int m_ffaKillStreak[kGameMaxPlayers] {};
    float m_ffaSpreeDue[kGameMaxPlayers] {};
    float m_nextFfaSpreeChatTime {};
+   float m_nextHumanKillChatTime {};
    int m_pendingKillReaction[kGameMaxPlayers] {};
    int m_killReactionTeam[kGameMaxPlayers] {};
    float m_killReactionTime[kGameMaxPlayers] {};
