@@ -7,7 +7,7 @@
 
 #include <yapb.h>
 
-ConVar cv_shoots_thru_walls ("shoots_thru_walls", "2", "Specifies whether bots are able to fire at enemies behind the wall, if they hear or suspect them.", true, 0.0f, 3.0f);
+ConVar cv_shoots_thru_walls ("shoots_thru_walls", "0", "Specifies whether bots are able to fire at a frozen last-known position behind a wall. Hidden players are never promoted to visible targets.", true, 0.0f, 3.0f);
 ConVar cv_ignore_enemies ("ignore_enemies", "0", "Enables or disables searching the world for enemies.");
 ConVar cv_check_enemy_rendering ("check_enemy_rendering", "0", "Enables or disables checking enemy rendering flags. Useful for some mods.");
 ConVar cv_check_enemy_invincibility ("check_enemy_invincibility", "0", "Enables or disables checking enemy invincibility. Useful for some mods.");
@@ -332,6 +332,29 @@ bool Bot::checkBodyPartsWithHitboxes (edict_t *target) {
    return false;
 }
 
+bool Bot::hasDirectLineOfSight (edict_t *player) {
+   if (game.isNullEntity (player)) {
+      return false;
+   }
+
+   const auto eyes = getEyesPos ();
+   const auto self = ent ();
+   TraceResult result {};
+
+   auto traceTo = [&] (const Vector &spot) -> bool {
+      // Ignore transparent glass, but not players/monsters. A solid world brush
+      // or another player between us and the target must stop visual acquisition.
+      game.testLine (eyes, spot, TraceIgnore::Glass, self, &result);
+      return result.pHit == player || result.flFraction >= 0.999f;
+   };
+
+   auto body = player->v.origin;
+   body.z += (player->v.flags & FL_DUCKING) ? 12.0f : 24.0f;
+   const auto head = player->v.origin + player->v.view_ofs;
+
+   return traceTo (body) || traceTo (head) || traceTo (player->v.origin);
+}
+
 bool Bot::seesEnemy (edict_t *player) {
    auto isBehindSmokeClouds = [&] (const Vector &pos) {
       if (cv_smoke_grenade_checks.as <int> () == 2) {
@@ -352,6 +375,7 @@ bool Bot::seesEnemy (edict_t *player) {
    if ((ignoreFieldOfView || isInViewCone (player->v.origin))
       && frustum.check (m_viewFrustum, player)
       && !isBehindSmokeClouds (player->v.origin)
+      && hasDirectLineOfSight (player)
       && checkBodyParts (player)) {
       return true;
    }
@@ -562,22 +586,21 @@ bool Bot::lookupEnemies () {
             return true;
          }
 
-         // now alarm all teammates who see this bot & don't have an actual enemy of the bots enemy should simulate human players seeing a teammate firing
+         // Teammates may notice our gunfire, but they do not inherit the exact
+         // enemy entity or position. They must acquire that player with their
+         // own line-of-sight trace.
          for (const auto &other : bots) {
             if (!other->m_isAlive || other->m_team != m_team || other.get () == this) {
                continue;
             }
 
             if (other->m_seeEnemyTime + 2.0f < game.time ()
-               && game.isNullEntity (other->m_lastEnemy)
+               && game.isNullEntity (other->m_enemy)
                && util.isVisible (pev->origin, other->ent ())
                && other->isInViewCone (pev->origin)) {
 
-               other->m_lastEnemy = newEnemy;
-               other->m_lastEnemyOrigin = newEnemy->v.origin;
-               other->m_seeEnemyTime = game.time ();
-               other->m_states |= (Sense::SuspectEnemy | Sense::HearingEnemy);
-               other->m_aimFlags |= AimFlags::LastEnemy;
+               other->m_heardSoundTime = game.time ();
+               other->m_states |= Sense::HearingEnemy;
             }
          }
          return true;
@@ -612,21 +635,21 @@ bool Bot::lookupEnemies () {
          return false;
       }
 
-      // if no enemy visible check if last one shoot able through wall
+      // A hidden enemy stays hidden. Optional wall shooting may use only the
+      // frozen last-known position; never refresh it from the live entity and
+      // never report SeeingEnemy without a successful visual trace.
       if (cv_shoots_thru_walls
+         && !m_lastEnemyOrigin.empty ()
          && rg.chance (m_difficultyData->seenThruPct)
-         && isPenetrableObstacle (newEnemy->v.origin)) {
-
-         m_seeEnemyTime = game.time ();
+         && isPenetrableObstacle (m_lastEnemyOrigin)) {
 
          m_states |= Sense::SuspectEnemy;
+         m_aimFlags &= ~AimFlags::Enemy;
          m_aimFlags |= AimFlags::LastEnemy;
+         m_enemy = nullptr;
+         m_enemyBodyPartSet = nullptr;
 
-         m_enemy = newEnemy;
-         m_lastEnemy = newEnemy;
-         m_lastEnemyOrigin = newEnemy->v.origin;
-
-         return true;
+         return false;
       }
    }
 
@@ -2345,14 +2368,22 @@ void Bot::checkGrenadesThrow () {
       }
    }
    float distanceSq = m_lastEnemyOrigin.distanceSq2d (pev->origin);
+   const bool hasVisualEnemy = (m_states & Sense::SeeingEnemy)
+      && game.isAliveEntity (m_enemy) && m_enemy == m_lastEnemy;
+   Vector grenadeTarget = m_lastEnemyOrigin;
 
-   // don't throw grenades at anything that isn't on the ground!
-   if (!(m_lastEnemy->v.flags & (FL_ONGROUND | FL_PARTIALGROUND)) && !m_lastEnemy->v.waterlevel && m_lastEnemyOrigin.z > pev->absmax.z) {
-      distanceSq = kInfiniteDistance;
+   if (hasVisualEnemy) {
+      grenadeTarget = m_enemy->v.origin;
+
+      // Only inspect live movement/state while the enemy is actually visible.
+      if (!(m_enemy->v.flags & (FL_ONGROUND | FL_PARTIALGROUND))
+         && !m_enemy->v.waterlevel && grenadeTarget.z > pev->absmax.z) {
+         distanceSq = kInfiniteDistance;
+      }
    }
 
    // too high to throw?
-   if (m_lastEnemy->v.origin.z > pev->origin.z + 500.0f) {
+   if (grenadeTarget.z > pev->origin.z + 500.0f) {
       distanceSq = kInfiniteDistance;
    }
 
@@ -2382,12 +2413,13 @@ void Bot::checkGrenadesThrow () {
       // care about different grenades
       switch (grenadeToThrow) {
       case Weapon::Explosive:
-         if (mp_friendlyfire && numFriendsNear (m_lastEnemy->v.origin, 256.0f) > 0) {
+         if (mp_friendlyfire && numFriendsNear (grenadeTarget, 256.0f) > 0) {
             allowThrowing = false;
          }
          else {
-            const auto radius = cr::max (192.0f, m_lastEnemy->v.velocity.length2d ());
-            const auto &pos = m_lastEnemy->v.velocity.get2d () + m_lastEnemy->v.origin;
+            const auto velocity = hasVisualEnemy ? m_enemy->v.velocity.get2d () : Vector {};
+            const auto radius = hasVisualEnemy ? cr::max (192.0f, m_enemy->v.velocity.length2d ()) : 192.0f;
+            const auto pos = grenadeTarget + velocity;
 
             auto predicted = graph.getNearestInRadius (radius, pos, 12);
 
@@ -2431,7 +2463,8 @@ void Bot::checkGrenadesThrow () {
 
       case Weapon::Flashbang:
       {
-         const int nearest = graph.getNearest (m_lastEnemy->v.velocity.get2d () + m_lastEnemy->v.origin);
+         const auto flashTarget = hasVisualEnemy ? grenadeTarget + m_enemy->v.velocity.get2d () : grenadeTarget;
+         const int nearest = graph.getNearest (flashTarget);
 
          if (nearest != kInvalidNodeIndex) {
             m_throw = graph[nearest].origin;
@@ -2469,8 +2502,8 @@ void Bot::checkGrenadesThrow () {
       }
 
       case Weapon::Smoke:
-         if (allowThrowing && !game.isNullEntity (m_lastEnemy)) {
-            if (util.getConeDeviation (m_lastEnemy, pev->origin) >= 0.9f) {
+         if (allowThrowing && hasVisualEnemy) {
+            if (util.getConeDeviation (m_enemy, pev->origin) >= 0.9f) {
                allowThrowing = false;
             }
          }
