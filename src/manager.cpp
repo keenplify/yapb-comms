@@ -69,9 +69,19 @@ void BotManager::logAiEvent (Bot *bot, edict_t *player, StringRef text, bool tea
    char timestamp[20] {};
    const auto local = std::localtime (&now);
    if (local) std::strftime (timestamp, sizeof (timestamp), "%Y-%m-%d %H:%M:%S", local);
-   std::fprintf (stream, "%s (INFO): [YaPB ai] %s bot=%d player=%d channel=%s mode=%s team=%d map=%s place=%s weapon=%s hp=%d money=%d friends=%d enemies=%d bomb=%d round=%.0f visible=%d slots=%d,%d,%d text=%s\n",
+   char safeBotName[32] {};
+   const char *rawBotName = bot->pev->netname.chars ();
+   int safeNameLength = 0;
+   while (rawBotName && *rawBotName && safeNameLength < 31) {
+      const char ch = *rawBotName++;
+      safeBotName[safeNameLength++] =
+         (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+         || (ch >= '0' && ch <= '9') || ch == '_' ? ch : '_';
+   }
+   std::fprintf (stream, "%s (INFO): [YaPB ai] %s bot=%d name=%s player=%d channel=%s mode=%s team=%d map=%s place=%s weapon=%s hp=%d money=%d friends=%d enemies=%d bomb=%d round=%.0f visible=%d slots=%d,%d,%d text=%s\n",
       timestamp,
-      canned ? "event" : "chat", bot->m_index, player ? game.indexOfPlayer (player) : -1,
+      canned ? "event" : "chat", bot->m_index, safeBotName,
+      player ? game.indexOfPlayer (player) : -1,
       teamOnly ? "team" : "all", game.is (GameFlags::FreeForAll) ? "ffa" : "teams",
       bot->m_team, game.getMapName (), place.chars (), weapon.chars (),
       static_cast <int> (bot->pev->health), bot->m_moneyAmount,
@@ -433,6 +443,10 @@ void BotManager::frame () {
                   else if (std::strncmp (pos, "follow ", 7) == 0) {
                      pos += 7;
                      safe = number () && *pos == '\0';
+                  }
+                  else if (std::strncmp (pos, "lead ", 5) == 0) {
+                     pos += 5;
+                     safe = (pos[0] == 'a' || pos[0] == 'b') && pos[1] == '\0';
                   }
                   else if (std::strncmp (pos, "chat team ", 10) == 0 || std::strncmp (pos, "chat all ", 9) == 0) {
                      pos += pos[5] == 't' ? 10 : 9;
