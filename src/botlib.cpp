@@ -3294,7 +3294,7 @@ void Bot::logicDuringFreezetime () {
       if (ent) {
          m_lookAt = ent->v.origin + ent->v.view_ofs;
 
-         if (m_buyingFinished && game.getPlayerTeam (ent) != m_team) {
+         if (m_buyingFinished && game.getPlayerTeam (ent) != m_team && !isEnemyNoTarget (ent)) {
             m_enemy = ent;
             m_enemyOrigin = ent->v.origin;
          }
