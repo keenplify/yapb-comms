@@ -288,7 +288,7 @@ void MessageDispatcher::netMsgDeathMsg () {
    if (game.isNullEntity (killerEntity) || game.isNullEntity (victimEntity) || victimEntity == killerEntity) {
       return;
    }
-   bots.handleDeath (killerEntity, victimEntity);
+   bots.handleDeath (killerEntity, victimEntity, m_args.length () > 3 ? m_args[3].chars_ : "");
 }
 
 void MessageDispatcher::netMsgScreenFade () {

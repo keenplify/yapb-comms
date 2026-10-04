@@ -98,6 +98,13 @@ void Bot::avoidGrenades () {
       }
       auto model = pent->v.model.str (9);
 
+      if (model == kFlashbangModelName && game.isPlayerEntity (pent->v.owner)
+         && !game.isFakeClientEntity (pent->v.owner) && pent->v.owner != ent ()
+         && game.getRealPlayerTeam (pent->v.owner) == m_team
+         && pent->v.origin.distanceSq (pev->origin) < cr::sqrf (850.0f)) {
+         m_recentFriendlyFlashAt = game.time ();
+      }
+
       if (m_preventFlashing < game.time () && model == kFlashbangModelName) {
          // don't look at flash bang
          if (!(m_states & Sense::SeeingEnemy)) {
@@ -1952,7 +1959,10 @@ void Bot::setConditions () {
          }
          m_radioPercent = cr::min (m_radioPercent - rg (1, 5), 15);
 
-         if (rg.chance (10)) {
+         if (m_lastSpecialKillMethod != 0 && m_commsStyle != CommsStyle::RadioOnly) {
+            sendAddressedReply (m_lastSpecialKillMethod == 1 ? "got the knife kill" : "nice nade kill", false);
+         }
+         else if (rg.chance (10)) {
             pushChatMessage (Chat::Kill);
          }
 
@@ -2024,6 +2034,7 @@ void Bot::setConditions () {
             sendTeamCallout ("My bad.");
          }
       }
+      m_lastSpecialKillMethod = 0;
       m_lastVictim = nullptr;
    }
 
@@ -3142,13 +3153,48 @@ void Bot::frame () {
 void Bot::update () {
    const auto tid = getCurrentTaskId ();
 
+   if (!m_speechQueue.empty () && m_typingUntil <= game.time ()) {
+      const QueuedSpeech line = m_speechQueue.popFront ();
+      if (game.is (GameFlags::Legacy)) {
+         sendToChatLegacy (line.text, line.teamOnly);
+      }
+      else {
+         issueCommand ("%s \"%s\"", line.teamOnly ? "say_team" : "say", line.text);
+         // CS 1.6 hides dead speakers from living players. Deliver this bot's
+         // line to those humans too, keeping team chat within its team.
+         if (!game.isAliveEntity (ent ())) {
+            String chatMsg {};
+            if (line.teamOnly) {
+               const char *teamName = m_team == Team::CT ? "(Counter-Terrorist)" : "(Terrorist)";
+               chatMsg.appendf ("%c*DEAD*%s %c%s%c :  %s\n", 0x01, teamName,
+                  0x03, pev->netname.chars (), 0x01, line.text.chars ());
+            }
+            else {
+               chatMsg.appendf ("%c*DEAD* %c%s%c :  %s\n", 0x01,
+                  0x03, pev->netname.chars (), 0x01, line.text.chars ());
+            }
+            for (const auto &client : util.getClients ()) {
+               if (!(client.flags & ClientFlags::Used) || !(client.flags & ClientFlags::Alive)
+                  || !client.ent || game.isFakeClientEntity (client.ent)
+                  || (line.teamOnly && client.team2 != m_team)) continue;
+               MessageWriter (MSG_ONE, msgs.id (NetMsg::SayText), nullptr, client.ent)
+                  .writeByte (m_index + 1)
+                  .writeString (chatMsg.chars ());
+            }
+         }
+      }
+      if (!m_speechQueue.empty ()) {
+         m_typingUntil = game.time () + cr::clamp (0.25f + static_cast <float> (m_speechQueue.front ().text.length ()) * 0.018f, 0.45f, 1.25f);
+      }
+   }
+
    m_canSetAimDirection = true;
    m_isAlive = game.isAliveEntity (ent ());
    if (!m_isAlive && m_pendingDeathLineTime > 0.0f && m_pendingDeathLineTime <= game.time ()) {
       m_pendingDeathLineTime = 0.0f;
       if (game.is (GameFlags::FreeForAll)) {
-         constexpr const char *lines[] = { "ouch", "wp", "got me", "my bad" };
-         sendAddressedReply (lines[rg (0, 3)], false);
+         constexpr const char *lines[] = { "ouch", "wp", "got me" };
+         sendAddressedReply (lines[rg (0, 2)], false);
       }
       else {
          constexpr const char *lines[] = { "My bad.", "Unlucky.", "Nice try." };
@@ -3157,6 +3203,37 @@ void Bot::update () {
    }
    m_team = game.getPlayerTeam (ent ());
    m_healthValue = cr::clamp (pev->health, 0.0f, 99999.9f);
+   if (m_flashFeedbackPending && gameState.isRoundOver ()) {
+      if (m_flashFeedbackDue <= 0.0f) m_flashFeedbackDue = game.time () + rg (2.8f, 4.2f);
+      if (m_flashFeedbackDue <= game.time ()) {
+         m_flashFeedbackPending = false;
+         for (const auto &client : util.getClients ()) {
+            if ((client.flags & ClientFlags::Used) && client.team == m_team
+               && client.ent && !game.isFakeClientEntity (client.ent)) {
+               if (bots.claimFlashFeedback (m_team)) {
+                  if (bots.hasRecentHumanFlashMention (m_team, m_recentFriendlyFlashAt)) {
+                     sendAddressedReply ("that flash got me too", true, true);
+                  }
+                  else {
+                     constexpr const char *lines[] = { "careful with that flash next time", "mind the flash next time" };
+                     sendAddressedReply (lines[rg (0, 1)], true, true);
+                  }
+               }
+               break;
+            }
+         }
+      }
+   }
+   if (m_adaptAnnouncePending && m_isAlive && m_spawnTime + 2.0f < game.time ()) {
+      m_adaptAnnouncePending = false;
+      for (const auto &client : util.getClients ()) {
+         if ((client.flags & ClientFlags::Used) && client.team == m_team
+            && client.ent && !game.isFakeClientEntity (client.ent)) {
+            sendTeamCallout ("I got picked there twice; taking a safer route.");
+            break;
+         }
+      }
+   }
 
    if (m_team == Team::Terrorist && game.mapIs (MapFlags::Demolition)) {
       m_hasC4 = !!(pev->weapons & cr::bit (Weapon::C4));
@@ -3510,6 +3587,37 @@ void Bot::logic () {
       }
    }
 
+   // Leave room behind a teammate moving toward the same destination.
+   if (m_moveSpeed > 0.0f && m_moveToGoal && !isOnLadder ()
+      && game.isNullEntity (m_enemy) && !(m_states & Sense::SeeingEnemy)
+      && m_needAvoidGrenade == 0 && !m_hasC4 && !m_isVIP && !m_hasHostage) {
+      for (const auto &client : util.getClients ()) {
+         if (!(client.flags & ClientFlags::Used) || !(client.flags & ClientFlags::Alive)
+            || client.team != m_team || client.ent == ent ()) continue;
+         const auto delta = client.ent->v.origin - pev->origin;
+         const float gap = 105.0f + static_cast <float> (index () % 4) * 15.0f;
+         if (delta.lengthSq2d () < cr::sqrf (65.0f)
+            || delta.lengthSq2d () > cr::sqrf (gap + 65.0f)) continue;
+         const auto route = (m_destOrigin - pev->origin).normalize2d_apx ();
+         const auto travel = client.ent->v.velocity.normalize2d_apx ();
+         if ((delta.normalize2d_apx () | route) > 0.7f && (travel | route) > 0.5f
+            && client.ent->v.velocity.lengthSq2d () > cr::sqrf (45.0f)) {
+            m_moveSpeed = cr::min (m_moveSpeed, cr::max (getShiftSpeed (), client.ent->v.velocity.length2d () * 0.7f));
+            break;
+         }
+      }
+   }
+
+   // Typing pauses navigation while combat and objective actions can interrupt it.
+   if (!m_speechQueue.empty () && m_typingUntil > game.time () && m_isAlive
+      && !isOnLadder () && game.isNullEntity (m_enemy)
+      && !(m_states & Sense::SeeingEnemy) && m_needAvoidGrenade == 0
+      && getCurrentTaskId () != Task::PlantBomb && getCurrentTaskId () != Task::DefuseBomb) {
+      m_moveSpeed = 0.0f;
+      m_strafeSpeed = 0.0f;
+      m_navTimeset = game.time ();
+   }
+
    // ensure we're not stuck picking something
    if (m_moveToGoal && m_moveSpeed > 0.0f
       && rg (2.5f, 3.5f) + m_navTimeset + m_destOrigin.distanceSq2d (pev->origin) / cr::sqrf (cr::max (1.0f, m_moveSpeed)) < game.time ()
@@ -3827,6 +3935,10 @@ void Bot::takeBlind (int alpha) {
    if (m_blindTime < game.time ()) {
       return;
    }
+   if (m_recentFriendlyFlashAt > 0.0f && m_recentFriendlyFlashAt + 2.0f >= game.time ()) {
+      m_flashFeedbackPending = true;
+      m_flashFeedbackDue = 0.0f;
+   }
    m_enemy = nullptr;
 
    if (m_difficulty <= Difficulty::Normal) {
@@ -3929,6 +4041,14 @@ void Bot::updatePracticeDamage (edict_t *attacker, int damage) {
 
 void Bot::pushChatMessage (int type, bool isTeamSay) {
    if (!conf.hasChatBank (type) || !cv_chat) {
+      return;
+   }
+
+   if (game.is (GameFlags::FreeForAll) && type == Chat::Kill) {
+      // The configurable kill bank includes apologies that do not fit FFA.
+      constexpr const char *lines[] = { "Good fight, %v.", "Got you, %v.", "Nice try, %v." };
+      prepareChatMessage (lines[rg (0, 2)]);
+      pushMsgQueue (BotMsg::Say);
       return;
    }
 

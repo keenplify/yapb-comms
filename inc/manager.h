@@ -49,8 +49,12 @@ private:
    float m_quotaMaintainTime {}; // time to maintain bot quota
    float m_plantSearchUpdateTime {}; // time to update for searching planted bomb
    float m_lastChatTime {}; // global chat time timestamp
-   float m_lastAddressedReplyTime {}; // global direct-reply rate limit
+   float m_lastAddressedReplyTime[kGameMaxPlayers] {}; // per-player reply rate limit
+   int m_lastChatPartner[kGameMaxPlayers] {};
+   String m_lastChatPartnerName[kGameMaxPlayers] {};
+   float m_lastChatPartnerTime[kGameMaxPlayers] {};
    float m_lastHumanTeamChat[kGameTeamNum] {};
+   bool m_humanChatThisRound[kGameTeamNum] {};
    bool m_humanCaptain[kGameTeamNum] {};
    bool m_botCaptainCalled[kGameTeamNum] {};
    int m_botCaptainIndex[kGameTeamNum] {};
@@ -66,6 +70,8 @@ private:
    float m_postRoundChatTime[kGameTeamNum] {};
    bool m_preRoundChatSent[kGameTeamNum] {};
    bool m_postRoundChatSent[kGameTeamNum] {};
+   bool m_flashFeedbackSent[kGameTeamNum] {};
+   float m_lastHumanFlashMention[kGameTeamNum] {};
    float m_deadChatTime {};
    float m_postPlantChatTime {};
    bool m_postPlantChatSent {};
@@ -73,6 +79,7 @@ private:
    int m_ffaKillStreak[kGameMaxPlayers] {};
    float m_ffaSpreeDue[kGameMaxPlayers] {};
    float m_nextFfaSpreeChatTime {};
+   float m_nextHighScoreChatTime {};
    float m_nextHumanKillChatTime {};
    int m_pendingKillReaction[kGameMaxPlayers] {};
    int m_killReactionTeam[kGameMaxPlayers] {};
@@ -129,6 +136,9 @@ public:
    Bot *findHighestFragBot (int team);
 
    int getHumansCount (bool ignoreSpectators = false);
+   bool hasHumanOnTeam (int team) const;
+   bool claimFlashFeedback (int team);
+   bool hasRecentHumanFlashMention (int team, float since) const;
    int getAliveHumansCount ();
    int getPlayerPriority (edict_t *ent);
 
@@ -181,7 +191,7 @@ public:
    void execGameEntity (edict_t *ent);
    void forEach (ForEachBot handler);
    void disconnectBot (Bot *bot);
-   void handleDeath (edict_t *killer, edict_t *victim);
+   void handleDeath (edict_t *killer, edict_t *victim, StringRef weapon);
    void setLastWinner (int winner);
    void checkBotModel (edict_t *ent, char *infobuffer);
    void checkNeedsToBeKicked ();

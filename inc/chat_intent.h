@@ -3,6 +3,35 @@
 
 #include <team_order.h>
 
+// Match a spoken name part such as "sim" to "simslater" or "sam" to
+// "sk8_sam_101". The caller checks ambiguity across the entire bot roster.
+inline bool mentionsBotNamePrefix (const char *words, const char *normalizedName) {
+   if (!words || !normalizedName) return false;
+   for (const char *nameWord = normalizedName; *nameWord;) {
+      const char *nameEnd = std::strchr (nameWord, ' ');
+      const size_t nameLength = nameEnd ? static_cast <size_t> (nameEnd - nameWord) : std::strlen (nameWord);
+      const bool common = (nameLength == 3 && (std::strncmp (nameWord, "the", 3) == 0
+         || std::strncmp (nameWord, "man", 3) == 0 || std::strncmp (nameWord, "bot", 3) == 0));
+      bool hasLetter = false;
+      for (size_t i = 0; i < nameLength; ++i) hasLetter |= nameWord[i] >= 'a' && nameWord[i] <= 'z';
+      if (nameLength >= 3 && !common && hasLetter) {
+         for (const char *word = words; *word;) {
+            const char *end = std::strchr (word, ' ');
+            const size_t length = end ? static_cast <size_t> (end - word) : std::strlen (word);
+            if (length >= 3 && length <= nameLength
+               && (nameLength > 3 || length == nameLength)
+               && !(length == 3 && std::strncmp (word, "bot", 3) == 0)
+               && std::strncmp (word, nameWord, length) == 0) return true;
+            if (!end) break;
+            word = end + 1;
+         }
+      }
+      if (!nameEnd) break;
+      nameWord = nameEnd + 1;
+   }
+   return false;
+}
+
 // Small, local conversational intents. No model or network call runs in-game.
 inline bool asksAboutBots (const char *raw) {
    char words[97] {};
@@ -60,6 +89,8 @@ inline bool startsWithGreeting (const char *raw) {
 // fragments stay with the built-in game communication path.
 inline bool isConversationalStatement (const char *words) {
    if (!words || !*words) return false;
+   if (std::strcmp (words, "notice me") == 0 || std::strcmp (words, "busy huh") == 0
+      || std::strcmp (words, "u there") == 0 || std::strcmp (words, "you there") == 0) return true;
    const char *tagalogOpeners[] = { "ano", "bakit", "saan", "paano", "pwede", "salamat" };
    for (const auto *opener : tagalogOpeners) {
       const size_t length = std::strlen (opener);

@@ -29,6 +29,7 @@ bool BotManager::aiBridgeReady () const {
 }
 
 void BotManager::logAiEvent (Bot *bot, edict_t *player, StringRef text, bool teamOnly, bool canned) {
+   if (teamOnly && !hasHumanOnTeam (bot->m_team)) return;
    // Snapshot only what this bot can currently know. Canned lines are sent
    // through the same sidecar as addressed human chat and keep their channel.
    loadMapCallouts ();
@@ -924,6 +925,10 @@ void BotManager::maintainRoundChat () {
       bool &sent = roundOver ? m_postRoundChatSent[team] : m_preRoundChatSent[team];
       const float due = roundOver ? m_postRoundChatTime[team] : m_preRoundChatTime[team];
       if (sent || due <= 0.0f || game.time () < due) continue;
+      if (!roundOver && m_humanChatThisRound[team]) {
+         sent = true;
+         continue;
+      }
       if (!roundOver && game.mapIs (MapFlags::Demolition)
          && !m_economyCallSent[team] && !m_humanCaptain[team]) continue;
       if (!roundOver && game.time () > gameState.getRoundStartTime () + 5.0f) {
@@ -956,6 +961,30 @@ void BotManager::maintainRoundChat () {
 }
 
 void BotManager::maintainKillReactions () {
+   if (game.time () >= m_nextHighScoreChatTime) {
+      const int minimumScore = game.is (GameFlags::FreeForAll) ? 40 : 20;
+      for (const auto &bot : bots) {
+         const int score = cr::max (0, static_cast <int> (bot->pev->frags));
+         const int milestone = score >= minimumScore ? score / 10 * 10 : 0;
+         if (milestone == 0) {
+            bot->m_lastHighScoreChatMilestone = 0;
+            continue;
+         }
+         if (milestone <= bot->m_lastHighScoreChatMilestone || !bot->m_isAlive
+            || bot->m_isCreature || bot->m_commsStyle == CommsStyle::RadioOnly
+            || (bot->m_lastTacticalChatTime > 0.0f
+               && bot->m_lastTacticalChatTime + 10.0f > game.time ())) continue;
+
+         constexpr const char *lines[] = { "%d frags and counting", "%d on the board, keep going", "%d frags, still in it" };
+         String line {};
+         line.assignf (lines[rg (0, 2)], score);
+         bot->sendAddressedReply (line, false);
+         bot->m_lastHighScoreChatMilestone = milestone;
+         m_nextHighScoreChatTime = game.time () + rg (30.0f, 45.0f);
+         break;
+      }
+   }
+
    if (game.is (GameFlags::FreeForAll)) {
       if (game.time () < m_nextFfaSpreeChatTime) return;
       for (int slot = 0; slot < kGameMaxPlayers; ++slot) {
@@ -1254,7 +1283,9 @@ void BotManager::maintainAutoKill () {
 void BotManager::reset () {
    m_plantSearchUpdateTime = 0.0f;
    m_lastChatTime = 0.0f;
-   m_lastAddressedReplyTime = 0.0f;
+   for (int slot = 0; slot < kGameMaxPlayers; ++slot) {
+      m_lastAddressedReplyTime[slot] = 0.0f;
+   }
    m_bombSayStatus = BombPlantedSay::ChatSay | BombPlantedSay::Chatter;
 }
 
@@ -2022,6 +2053,26 @@ int BotManager::getHumansCount (bool ignoreSpectators) {
    return count;
 }
 
+bool BotManager::hasHumanOnTeam (int team) const {
+   for (const auto &client : util.getClients ()) {
+      if ((client.flags & ClientFlags::Used) && client.ent && client.team2 == team
+         && !game.isFakeClientEntity (client.ent)) return true;
+   }
+   return false;
+}
+
+bool BotManager::claimFlashFeedback (int team) {
+   if (team < 0 || team >= kGameTeamNum || m_flashFeedbackSent[team]) return false;
+   m_flashFeedbackSent[team] = true;
+   return true;
+}
+
+bool BotManager::hasRecentHumanFlashMention (int team, float since) const {
+   return team >= 0 && team < kGameTeamNum && m_lastHumanFlashMention[team] > 0.0f
+      && m_lastHumanFlashMention[team] >= since
+      && m_lastHumanFlashMention[team] + 20.0f >= game.time ();
+}
+
 int BotManager::getAliveHumansCount () {
    // this function returns number of humans playing on the server
 
@@ -2105,7 +2156,7 @@ void BotManager::disconnectBot (Bot *bot) {
    }
 }
 
-void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
+void BotManager::handleDeath (edict_t *killer, edict_t *victim, StringRef weapon) {
    const auto killerTeam = game.getRealPlayerTeam (killer);
    const auto victimTeam = game.getRealPlayerTeam (victim);
 
@@ -2192,6 +2243,20 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
 
    // mark bot as "spawned", and reset it to new-round state when it dead (for csdm/zombie only)
    if (victimBot != nullptr) {
+      if (killerTeam != victimTeam && !game.is (GameFlags::CSDM | GameFlags::FreeForAll)) {
+         const int deathNode = graph.getNearest (victim->v.origin, 512.0f);
+         if (graph.exists (deathNode)) {
+            if (graph.exists (victimBot->m_lastDeathNode)
+               && graph[deathNode].origin.distanceSq2d (graph[victimBot->m_lastDeathNode].origin) < cr::sqrf (600.0f)) {
+               ++victimBot->m_repeatedRouteDeaths;
+            }
+            else {
+               victimBot->m_repeatedRouteDeaths = 1;
+            }
+            victimBot->m_lastDeathNode = deathNode;
+            if (victimBot->m_repeatedRouteDeaths >= 2) victimBot->m_adaptRoundsLeft = 2;
+         }
+      }
       victimBot->spawned ();
       victimBot->m_isAlive = false;
       victimBot->m_pendingDeathLineTime = 0.0f;
@@ -2210,6 +2275,8 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
       if (killedByHuman
          && victimBot->m_commsStyle != CommsStyle::RadioOnly
          && game.time () >= m_nextHumanKillChatTime) {
+         const bool knifeKill = weapon == "knife";
+         const bool nadeKill = weapon == "hegrenade" || weapon == "grenade";
          const int targetFromServer = static_cast <int> (engfuncs.pfnCVarGetFloat ("competitive_score_target"));
          const int target = targetFromServer > 0 ? targetFromServer
             : game.is (GameFlags::FreeForAll) ? 90 : 13;
@@ -2231,12 +2298,14 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
          const bool matchPointPressure = humanScore >= target - 1 && botScore < humanScore;
          const bool frustrated = botScore < humanScore
             && (matchPointPressure || deficit >= 4 || rg.chance (35));
-         const int chance = frustrated ? 45 : 22;
+         const int chance = (knifeKill || nadeKill) ? 100 : frustrated ? 45 : 22;
 
          if (rg.chance (chance)) {
             constexpr const char *frustratedLines[] = { "come on", "bruh", "rough", "ugh" };
             constexpr const char *normalLines[] = { "wp", "close", "ok ok", "not over" };
-            const char *mood = frustrated ? frustratedLines[rg (0, 3)] : normalLines[rg (0, 3)];
+            const char *mood = knifeKill ? "that knife was clean"
+               : nadeKill ? "nice nade"
+               : frustrated ? frustratedLines[rg (0, 3)] : normalLines[rg (0, 3)];
 
             String line {};
             line.assignf ("%d-%d first to %d, %s", botScore, humanScore, target, mood);
@@ -2258,6 +2327,9 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
    // is this message about a bot who killed somebody?
    if (killerBot != nullptr) {
       killerBot->setLastVictim (victim);
+      if (killerTeam != victimTeam) killerBot->m_recentKillAt = game.time ();
+      killerBot->m_lastSpecialKillMethod = weapon == "knife" ? 1
+         : (weapon == "hegrenade" || weapon == "grenade") ? 2 : 0;
    }
 
    // did a human kill a bot on his team?
@@ -2283,6 +2355,9 @@ void Bot::newRound () {
    // delete all allocated path nodes
    clearSearchNodes ();
    m_pendingDeathLineTime = 0.0f;
+   m_recentFriendlyFlashAt = 0.0f;
+   m_flashFeedbackDue = 0.0f;
+   m_flashFeedbackPending = false;
    m_lastDefuseCalloutTime = 0.0f;
    m_postPlantRepositioned = false;
    m_nextPostPlantRouteTime = 0.0f;
@@ -2334,12 +2409,29 @@ void Bot::newRound () {
    m_team = game.getPlayerTeam (ent ());
 
    resetPathSearchType ();
+   m_adaptStrategyActive = m_adaptRoundsLeft > 0 && graph.exists (m_lastDeathNode)
+      && !game.is (GameFlags::CSDM | GameFlags::FreeForAll);
+   m_adaptAnnouncePending = m_adaptStrategyActive;
+   if (m_adaptStrategyActive) {
+      m_pathType = FindPath::Safe;
+      --m_adaptRoundsLeft;
+   }
+   m_typingUntil = 0.0f;
+   m_speechQueue.clear ();
 
    // clear all states & tasks
    m_states = 0;
    clearTasks ();
 
    m_isLeader = false;
+   m_recentKillAt = 0.0f;
+   m_flickErrorUntil = 0.0f;
+   m_flickOffset.clear ();
+   m_nextReactionScan = 0.0f;
+   for (int i = 0; i < kGameMaxPlayers; ++i) {
+      m_reactionLastVisible[i] = 0.0f;
+      m_reactionReadyAt[i] = 0.0f;
+   }
    m_hasProgressBar = false;
    m_canSetAimDirection = true;
    m_preventFlashing = 0.0f;
@@ -2917,6 +3009,15 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
       const int speakerTeam = game.getRealPlayerTeam (ent);
       if (speakerTeam == Team::CT || speakerTeam == Team::Terrorist) {
          m_lastHumanTeamChat[speakerTeam] = game.time ();
+         m_humanChatThisRound[speakerTeam] = true;
+         char words[97] {};
+         bool question = false;
+         if (normalizeTeamPhrase (engfuncs.pfnCmd_Args (), words, question)
+            && (std::strstr (words, "flash got me") || std::strstr (words, "got flashed")
+               || std::strstr (words, "flashed me") || std::strstr (words, "blinded me")
+               || std::strstr (words, "im blind") || std::strstr (words, "i m blind"))) {
+            m_lastHumanFlashMention[speakerTeam] = game.time ();
+         }
       }
    }
 
@@ -3255,9 +3356,11 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
    if (cmd.startsWith ("say")) {
       // Addressed replies preserve the player's channel. Orders above are
       // deliberately restricted to say_team and never enter this path.
-      if (!game.isFakeClientEntity (ent)
+      const int playerSlot = game.indexOfPlayer (ent);
+      if (!game.isFakeClientEntity (ent) && playerSlot >= 0 && playerSlot < kGameMaxPlayers
          && (cmd == "say" || (!game.is (GameFlags::FreeForAll) && cmd == "say_team"))
-         && (m_lastAddressedReplyTime <= 0.0f || m_lastAddressedReplyTime + 8.0f < game.time ())) {
+         && (m_lastAddressedReplyTime[playerSlot] <= 0.0f
+            || m_lastAddressedReplyTime[playerSlot] + 1.5f < game.time ())) {
          char words[97] {};
          bool question = false;
          const bool normalized = normalizeTeamPhrase (engfuncs.pfnCmd_Args (), words, question);
@@ -3289,35 +3392,76 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
                return false;
             };
             const bool genericAddress = containsWord ("bot") || containsWord ("bots");
-            const bool openConversation = international || question || asksForResponse (engfuncs.pfnCmd_Args ())
-               || startsWithGreeting (engfuncs.pfnCmd_Args ())
-               || (cv_ai_bridge && aiBridgeReady () && isConversationalStatement (words));
+            const bool openInvitation = international || question || asksForResponse (engfuncs.pfnCmd_Args ())
+               || startsWithGreeting (engfuncs.pfnCmd_Args ());
+            const bool conversational = cv_ai_bridge && aiBridgeReady () && isConversationalStatement (words);
+            const auto eligible = [this, ent, &cmd] (Bot *bot) {
+               return !bot->m_isCreature
+                  && (cmd != "say_team" || bot->m_team == game.getRealPlayerTeam (ent));
+            };
+            Bot *recipient = nullptr;
+            bool namedRequest = false;
+            // Prefer a complete name when several bots share a first word.
             for (const auto &bot : bots) {
-               if (bot->m_isCreature || bot->m_commsStyle == CommsStyle::RadioOnly
-                  || bot->m_isAlive != game.isAliveEntity (ent)
-                  || (cmd == "say_team" && bot->m_team != game.getRealPlayerTeam (ent))) {
-                  continue;
-               }
                char botName[97] {};
                bool unused = false;
                const bool named = normalizeTeamPhrase (bot->pev->netname.chars (), botName, unused)
                   && std::strlen (botName) >= 3 && containsWord (botName);
-               if (!rosterQuestion && !genericAddress && !named && !openConversation) {
-                  continue;
+               if (!named) continue;
+               namedRequest = true;
+               if (eligible (bot.get ())) recipient = bot.get ();
+               break;
+            }
+            if (!namedRequest) {
+               int shortNameMatches = 0;
+               for (const auto &bot : bots) {
+                  char botName[97] {};
+                  bool unused = false;
+                  if (!normalizeTeamPhrase (bot->pev->netname.chars (), botName, unused)) continue;
+                  if (!mentionsBotNamePrefix (words, botName)) continue;
+                  ++shortNameMatches;
+                  if (eligible (bot.get ())) recipient = bot.get ();
                }
+               if (shortNameMatches > 0) namedRequest = true;
+               if (shortNameMatches != 1) recipient = nullptr;
+            }
+            if (!namedRequest && !recipient && (openInvitation || conversational)
+               && m_lastChatPartnerTime[playerSlot] > 0.0f
+               && m_lastChatPartnerTime[playerSlot] <= game.time ()
+               && m_lastChatPartnerTime[playerSlot] + 35.0f > game.time ()) {
+               for (const auto &bot : bots) {
+                  if (bot->m_index == m_lastChatPartner[playerSlot]
+                     && m_lastChatPartnerName[playerSlot] == bot->pev->netname.chars ()
+                     && eligible (bot.get ())) {
+                     recipient = bot.get ();
+                     break;
+                  }
+               }
+            }
+            if (!namedRequest && !recipient && (rosterQuestion || genericAddress || openInvitation)) {
+               for (const auto &bot : bots) {
+                  if (eligible (bot.get ()) && bot->m_commsStyle != CommsStyle::RadioOnly) {
+                     recipient = bot.get ();
+                     break;
+                  }
+               }
+            }
+            if (recipient) {
                if (cv_ai_bridge && aiBridgeReady ()) {
-                  logAiEvent (bot.get (), ent, words, cmd == "say_team", false);
+                  logAiEvent (recipient, ent, words, cmd == "say_team", false);
                }
                else if (rosterQuestion) {
                   constexpr const char *replies[] = { "Maybe.", "You tell me.", "Could be. Why?" };
-                  const int variation = (bot->m_index + static_cast <int> (game.time () / 30.0f)) % 3;
-                  bot->sendAddressedReply (replies[variation], cmd == "say_team");
+                  const int variation = (recipient->m_index + static_cast <int> (game.time () / 30.0f)) % 3;
+                  recipient->sendAddressedReply (replies[variation], cmd == "say_team");
                }
                else {
-                  bot->sendAddressedReply (cmd == "say_team" ? "Yeah?" : "What's up?", cmd == "say_team");
+                  recipient->sendAddressedReply (cmd == "say_team" ? "Yeah?" : "What's up?", cmd == "say_team");
                }
-               m_lastAddressedReplyTime = game.time ();
-               break;
+               m_lastAddressedReplyTime[playerSlot] = game.time ();
+               m_lastChatPartner[playerSlot] = recipient->m_index;
+               m_lastChatPartnerName[playerSlot] = recipient->pev->netname.chars ();
+               m_lastChatPartnerTime[playerSlot] = game.time ();
             }
          }
       }
@@ -3329,7 +3473,9 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
       }
 
       for (const auto &client : util.getClients ()) {
-         if (!(client.flags & ClientFlags::Used) || (team != -1 && team != client.team2) || alive != game.isAliveEntity (client.ent)) {
+         if (!(client.flags & ClientFlags::Used) || (team != -1 && team != client.team2)
+            || (alive != game.isAliveEntity (client.ent)
+               && !(!alive && game.isAliveEntity (client.ent)))) {
             continue;
          }
          auto target = bots[client.ent];
@@ -3519,6 +3665,7 @@ void BotManager::initRound () {
 
       m_teamData[team].lastRadioTimestamp = 0.0f;
       m_lastHumanTeamChat[team] = game.time ();
+      m_humanChatThisRound[team] = false;
       m_humanCaptain[team] = false;
       m_botCaptainCalled[team] = false;
       m_botCaptainIndex[team] = -1;
@@ -3526,10 +3673,13 @@ void BotManager::initRound () {
       m_economyCallSent[team] = false;
       for (int place = 0; place < 3; ++place) m_lastEnemyReportTime[team][place] = 0.0f;
       m_lastQueuedAckTime[team] = 0.0f;
-      m_preRoundChatTime[team] = game.time () + rg (1.5f, 3.0f);
+      m_preRoundChatTime[team] = cr::max (game.time () + rg (1.5f, 3.0f),
+         gameState.getRoundStartTime () + 0.75f);
       m_postRoundChatTime[team] = 0.0f;
       m_preRoundChatSent[team] = false;
       m_postRoundChatSent[team] = false;
+      m_flashFeedbackSent[team] = false;
+      m_lastHumanFlashMention[team] = 0.0f;
       m_dropOfferPhase[team] = 0;
       m_dropOfferRich[team] = -1;
       m_dropOfferPoor[team] = -1;
@@ -3555,6 +3705,7 @@ void BotManager::initRound () {
       m_killReactionTime[slot] = 0.0f;
    }
    m_nextFfaSpreeChatTime = 0.0f;
+   m_nextHighScoreChatTime = 0.0f;
    m_nextHumanKillChatTime = 0.0f;
    m_pendingOrderAcks.clear ();
    m_nextCommsDebugTime = 0.0f;

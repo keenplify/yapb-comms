@@ -351,7 +351,7 @@ int Bot::findGoalPost (int tactic, IntArray *defensive, IntArray *offensive) {
    ensureCurrentNodeIndex ();
 
    // rusher bots does not care any danger (idea from pbmm)
-   if (m_personality == Personality::Rusher) {
+   if (m_personality == Personality::Rusher && !m_adaptStrategyActive) {
       const auto randomGoal = goalChoices[rg (0, 3)];
 
       if (graph.exists (randomGoal)) {
@@ -378,6 +378,18 @@ int Bot::findGoalPost (int tactic, IntArray *defensive, IntArray *offensive) {
    // the most worst case
    if (goalChoices[0] == kInvalidNodeIndex) {
       return m_chosenGoalIndex = graph.random ();
+   }
+   // Keep the normal preferred goal unless it is close to the area where this
+   // bot was repeatedly killed and another valid goal is available.
+   if (m_adaptStrategyActive && graph.exists (m_lastDeathNode)
+      && !m_hasC4 && !m_isVIP && !m_hasHostage
+      && graph[goalChoices[0]].origin.distanceSq2d (graph[m_lastDeathNode].origin) < cr::sqrf (850.0f)) {
+      for (int i = 1; i < 4; ++i) {
+         if (graph.exists (goalChoices[i])
+            && graph[goalChoices[i]].origin.distanceSq2d (graph[m_lastDeathNode].origin) >= cr::sqrf (850.0f)) {
+            return m_chosenGoalIndex = goalChoices[i];
+         }
+      }
    }
    return m_chosenGoalIndex = goalChoices[0]; // return and store goal
 }
@@ -1244,15 +1256,14 @@ bool Bot::updateNavigation () {
       game.testLine (pev->origin, m_pathOrigin, TraceIgnore::Monsters, ent (), &tr);
 
       if (!game.isNullEntity (tr.pHit) && m_liftState == LiftState::None && game.isDoorEntity (tr.pHit)) {
-         const auto &origin = game.getEntityOrigin (tr.pHit);
-         const float distanceSq = pev->origin.distanceSq (origin);
+         const float distanceSq = pev->origin.distanceSq (tr.vecEndPos);
 
          // if the door is near enough...
-         if (distanceSq < cr::sqrf (56.0f)) {
+         if (distanceSq < cr::sqrf (96.0f)) {
             ignoreCollision (); // don't consider being stuck
 
-            // also 'use' the door randomly
-            if (m_buttonPushTime < game.time () && rg.chance (50)) {
+            // Operate the door deliberately and let it move before advancing.
+            if (m_buttonPushTime < game.time ()) {
                // do not use door directly under xash, or we will get failed assert in gamedll code
                if (game.is (GameFlags::Xash3D)) {
                   pev->button |= IN_USE;
@@ -1262,6 +1273,9 @@ bool Bot::updateNavigation () {
                }
                m_buttonPushTime = game.time () + 1.5f;
             }
+            m_moveSpeed = 0.0f;
+            m_strafeSpeed = 0.0f;
+            m_navTimeset = game.time ();
          }
 
          // make sure we are always facing the door when going through it
@@ -1282,7 +1296,8 @@ bool Bot::updateNavigation () {
          }
 
          // if bot hits the door, then it opens, so wait a bit to let it open safely
-         if (pev->velocity.lengthSq2d () < cr::sqrf (10.0f) && m_timeDoorOpen < game.time ()) {
+         if (distanceSq < cr::sqrf (128.0f) && pev->velocity.lengthSq2d () < cr::sqrf (10.0f)
+            && m_timeDoorOpen < game.time ()) {
             if (m_timeHitDoor >= game.time ()) {
                startTask (Task::Pause, TaskPri::Pause, kInvalidNodeIndex, game.time () + 0.5f, false);
             }
@@ -1290,26 +1305,7 @@ bool Bot::updateNavigation () {
 
             ++m_tryOpenDoor;
 
-            if (m_tryOpenDoor > 1 && m_tryOpenDoor < 4) {
-               edict_t *nearest = nullptr;
-
-               // try to find nearest enemy (maybe behind a door)
-               util.findNearestPlayer (reinterpret_cast <void **> (&nearest), ent (), 256.0f, false, false, true, true, false);
-
-               // check if enemy is penetrable
-               if (game.isAliveEntity (nearest) && isPenetrableObstacle (nearest->v.origin) && !cv_ignore_enemies) {
-                  m_seeEnemyTime = game.time ();
-
-                  m_states |= Sense::SeeingEnemy | Sense::SuspectEnemy;
-                  m_aimFlags |= AimFlags::Enemy;
-
-                  m_enemy = nearest;
-                  m_lastEnemyOrigin = nearest->v.origin;
-
-                  m_tryOpenDoor = 0;
-               }
-            }
-            else if (m_tryOpenDoor > 4) {
+            if (m_tryOpenDoor > 4) {
                m_tryOpenDoor = 0;
 
                const auto prevNodeIndex = m_previousNodes[0];
@@ -1321,6 +1317,9 @@ bool Bot::updateNavigation () {
                m_timeHitDoor = game.time () + 3.0f;
             }
          }
+      }
+      else {
+         m_tryOpenDoor = 0;
       }
    }
 

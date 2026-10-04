@@ -429,6 +429,38 @@ bool Bot::lookupEnemies () {
    if (m_enemyIgnoreTimer > game.time () || m_blindTime > game.time () || cv_ignore_enemies) {
       return false;
    }
+   // Observe each visible opponent independently. The current target must not
+   // consume the reaction time of another player already in view.
+   if (m_nextReactionScan <= game.time ()) {
+      m_nextReactionScan = game.time () + 0.15f;
+      const auto savedParts = m_enemyParts;
+      const auto savedOrigin = m_enemyOrigin;
+      uint8_t *visibleSet = cv_use_engine_pvs_check ? game.getVisibilitySet (this, true) : nullptr;
+
+      for (const auto &client : util.getClients ()) {
+         if (!(client.flags & ClientFlags::Used) || !(client.flags & ClientFlags::Alive)
+            || client.team == m_team || !client.ent || client.ent == ent ()) {
+            continue;
+         }
+         const int targetIndex = game.indexOfPlayer (client.ent);
+
+         if (targetIndex < 0 || targetIndex >= kGameMaxPlayers
+            || (visibleSet && !game.checkVisibility (client.ent, visibleSet))
+            || !seesEnemy (client.ent)) {
+            continue;
+         }
+         if (m_reactionLastVisible[targetIndex] + 0.45f < game.time ()) {
+            const bool aggressive = m_personality == Personality::Rusher || m_agressionLevel >= m_fearLevel;
+            const float base = cv_whose_your_daddy ? 0.05f
+               : rg (m_difficultyData->reaction[0], m_difficultyData->reaction[1]);
+
+            m_reactionReadyAt[targetIndex] = game.time () + base * (aggressive ? 0.7f : 1.0f);
+         }
+         m_reactionLastVisible[targetIndex] = game.time ();
+      }
+      m_enemyParts = savedParts;
+      m_enemyOrigin = savedOrigin;
+   }
    edict_t *player, *newEnemy = nullptr;
    float nearestDistanceSq = cr::sqrf (m_viewDistance);
 
@@ -588,13 +620,29 @@ bool Bot::lookupEnemies () {
          }
          m_targetEntity = nullptr; // stop following when we see an enemy...
 
-         if (cv_whose_your_daddy) {
-            m_enemySurpriseTime = m_actualReactionTime * 0.5f;
+         const int targetIndex = game.isPlayerEntity (newEnemy) ? game.indexOfPlayer (newEnemy) : -1;
+
+         if (targetIndex >= 0 && targetIndex < kGameMaxPlayers
+            && m_reactionReadyAt[targetIndex] > 0.0f
+            && m_reactionLastVisible[targetIndex] + 0.45f >= game.time ()) {
+            m_enemySurpriseTime = m_reactionReadyAt[targetIndex];
+         }
+         else if (targetIndex >= 0 && targetIndex < kGameMaxPlayers) {
+            m_enemySurpriseTime = game.time () + rg (m_difficultyData->reaction[0], m_difficultyData->reaction[1]);
          }
          else {
-            m_enemySurpriseTime = m_actualReactionTime;
+            m_enemySurpriseTime = game.time () + m_actualReactionTime * (cv_whose_your_daddy ? 0.5f : 1.0f);
          }
-         m_enemySurpriseTime += game.time ();
+
+         // A quick post-kill flick can be imperfect even when the second
+         // player's reaction timer has already elapsed.
+         if (m_recentKillAt > 0.0f && m_recentKillAt + 0.8f > game.time ()
+            && (m_personality == Personality::Rusher || m_agressionLevel >= m_fearLevel)) {
+            m_flickErrorUntil = game.time () + rg (0.18f, 0.32f);
+            m_flickOffset = Vector (rg (24.0f, 40.0f) * (rg.chance (50) ? -1.0f : 1.0f),
+               rg (18.0f, 34.0f) * (rg.chance (50) ? -1.0f : 1.0f), rg (-9.0f, 9.0f));
+            m_recentKillAt = 0.0f;
+         }
 
          // zero out reaction time
          m_actualReactionTime = 0.0f;
@@ -827,6 +875,9 @@ Vector Bot::getEnemyBodyOffset () {
    if (m_difficulty < Difficulty::Normal) {
       spot += getBodyOffsetError (distance);
    }
+   if (m_flickErrorUntil > game.time () && game.isPlayerEntity (m_enemy)) {
+      spot += m_flickOffset;
+   }
    return spot;
 }
 
@@ -905,6 +956,13 @@ bool Bot::isPenetrableObstacle (const Vector &dest) {
    // credits goes to Immortal_BLG
 
    if (m_isUsingGrenade || m_difficulty < Difficulty::Normal) {
+      return false;
+   }
+   // Doors are navigable entities. Open or route around them instead of
+   // treating an enemy behind one as a wallbang target.
+   TraceResult doorTrace {};
+   game.testLine (getEyesPos (), dest, TraceIgnore::Monsters, ent (), &doorTrace);
+   if (game.isDoorEntity (doorTrace.pHit)) {
       return false;
    }
    auto penetratePower = conf.findWeaponById (m_currentWeapon).penetratePower;

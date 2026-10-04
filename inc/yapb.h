@@ -114,6 +114,11 @@ struct FrameDelay {
    float time {};
 };
 
+struct QueuedSpeech {
+   String text {};
+   bool teamOnly {};
+};
+
 // shared team data for bot
 struct BotTeamData {
    bool leaderChoosen {}; // is team leader choose thees round
@@ -258,6 +263,7 @@ private:
    float m_timeHitDoor {}; // specific time after hitting the door
    float m_lastChatTime {}; // time bot last chatted
    float m_lastTacticalChatTime {}; // rate limit for purposeful bot messages
+   float m_typingUntil {};
    float m_timeLogoSpray {}; // time bot last spray logo
    float m_knifeAttackTime {}; // time to rush with knife (at the beginning of the round)
    float m_duckDefuseCheckTime {}; // time to check for ducking for defuse
@@ -382,6 +388,7 @@ private:
    BotDifficultyData *m_difficultyData {};
    Path *m_path {}; // pointer to the current path node
    String m_chatBuffer {}; // space for strings (say text...)
+   Deque <QueuedSpeech> m_speechQueue {};
    Frustum::Planes m_viewFrustum {};
 
    CountdownTimer m_forgetLastVictimTimer {}; // time to forget last victim position ?
@@ -641,6 +648,9 @@ public:
    float m_checkDarkTime {}; // check for darkness time
    float m_preventFlashing {}; // bot turned away from flashbang
    float m_blindTime {}; // time when bot is blinded
+   float m_recentFriendlyFlashAt {};
+   float m_flashFeedbackDue {};
+   bool m_flashFeedbackPending {};
    float m_blindMoveSpeed {}; // mad speeds when bot is blind
    float m_blindSideMoveSpeed {}; // mad side move speeds when bot is blind
    float m_fallDownTime {}; // time bot started to fall 
@@ -661,6 +671,12 @@ public:
    float m_enemySurpriseTime {}; // time of surprise
    float m_idealReactionTime {}; // time of base reaction
    float m_actualReactionTime {}; // time of current reaction time
+   float m_reactionLastVisible[kGameMaxPlayers + 1] {};
+   float m_reactionReadyAt[kGameMaxPlayers + 1] {};
+   float m_nextReactionScan {};
+   float m_recentKillAt {};
+   float m_flickErrorUntil {};
+   Vector m_flickOffset {};
    float m_timeNextTracking {}; // time node index for tracking player is recalculated
    float m_firePause {}; // time to pause firing
    float m_shootTime {}; // time to shoot
@@ -685,6 +701,13 @@ public:
    int m_radioOrder {}; // actual command
    int m_commsStyle {}; // radio, chat, or both
    int m_commsSequence {}; // alternates delivery for bots that use both
+   int m_lastHighScoreChatMilestone {}; // last frag milestone announced in chat
+   int m_lastSpecialKillMethod {}; // knife or grenade kill awaiting a chat reaction
+   bool m_adaptStrategyActive {};
+   int m_lastDeathNode { kInvalidNodeIndex };
+   int m_repeatedRouteDeaths {};
+   int m_adaptRoundsLeft {};
+   bool m_adaptAnnouncePending {};
    bool m_requestedJump {}; // one movement frame, from an approved order
    float m_pendingDeathLineTime {}; // optional short dead-team reaction
    float m_lastDefuseCalloutTime {}; // one cover request per defuse attempt

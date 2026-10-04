@@ -21,7 +21,9 @@ Bot text chat is lowercase, including acknowledgements and round messages.
 Chat-capable bots answer a human who addresses a bot by name, says `bot` or
 `bots`, asks a question, greets with `hello`/`hi`/`hey`/`yo`, or asks why no
 one is responding. A message in `say` gets a short `say` reply; a message in `say_team`
-gets a `say_team` reply. One bot responds, with an eight-second global cooldown.
+gets a `say_team` reply. A complete bot name or unique first name takes priority.
+Short followups stay with that bot; ambiguous names get no substitute reply.
+Replies have a per-player cooldown so one conversation does not block another.
 Radio-only bots do not type. All-chat messages cannot issue tactical orders.
 Human team-chat orders that are recognized take priority over social replies.
 For example, `is everyone a bot?` gets a short, deliberately ambiguous answer
@@ -62,8 +64,8 @@ Human messages take priority over canned bot speech. Stale events are dropped,
 and at most two canned lines from one log read are handled, so a busy round
 does not keep human replies waiting behind a growing queue.
 Human replies carry the original player's slot to YaPB. If the selected bot
-dies before the reply arrives, YaPB chooses another chat-capable bot with the
-same alive/dead visibility and team channel. Human replies use a two-second
+is no longer visible to that player when the reply arrives, the reply is
+dropped; another bot must not impersonate the addressee. Human replies use a two-second
 minimum interval; the hourly provider budget still applies.
 
 Each event includes the selected bot's map, nearest verified CZ callout,
@@ -237,6 +239,15 @@ MR12 first-to-13 target, while FFA uses first-to-90 and the bot/killer frag
 scores. Bots become more likely to sound frustrated when trailing badly or
 facing match point. Bot-vs-bot deaths do not trigger this opponent banter, and
 a global cooldown prevents death-chat spam.
+Knife and HE grenade kills by a human use a specific reaction when that
+cooldown is free, instead of the usual random death reaction.
+Bots that land a knife or HE grenade kill also use a short weapon-specific
+line in place of random kill chat when their text cooldown is free.
+
+In any mode, a living chat-capable bot comments on its own frag score after
+crossing a high-score milestone (20 frags in team modes, 40 in FFA, then every
+10 frags). Each bot announces a milestone once, with a shared cooldown between
+high-score messages.
 
 After a bomb plant, living Terrorist bots more than 700 units from the planted
 site now interrupt stale routes and head to a nearby YaPB graph node at the

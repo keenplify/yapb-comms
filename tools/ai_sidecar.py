@@ -282,7 +282,7 @@ def ask_provider(event, api_key, api_url, model, timeout, variants=(), dialogue=
             {"role": "user", "content": json.dumps(message)},
         ],
         "temperature": 0.7,
-        "max_tokens": 256,
+        "max_tokens": 128,
     }
     payload = json.dumps(body).encode("utf-8")
     req = request.Request(api_url, data=payload, method="POST", headers={
@@ -296,7 +296,25 @@ def ask_provider(event, api_key, api_url, model, timeout, variants=(), dialogue=
     if len(raw) > 65536:
         raise ValueError("provider response too large")
     content = json.loads(raw)["choices"][0]["message"]["content"]
-    return json.loads(content)
+    return parse_model_content(content)
+
+
+def parse_model_content(content):
+    """Accept compact DeepSeek replies even if it omits the JSON wrapper."""
+    if not isinstance(content, str):
+        raise ValueError("provider returned no text")
+    stripped = content.strip()
+    if stripped.startswith("```") and stripped.endswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", stripped).strip()
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        if SAFE_REPLY.fullmatch(stripped) and len(stripped.encode("utf-8")) <= 90:
+            return {"reply": stripped.lower(), "action": "none"}
+        raise ValueError("provider reply was neither JSON nor short plain text") from None
+    if isinstance(parsed, dict) and set(parsed) == {"reply"}:
+        parsed["action"] = "none"
+    return parsed
 
 
 def probe_provider(api_key, api_url, model, timeout):
@@ -723,13 +741,7 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
             if can_request and shared_budget is not None:
                 can_request = shared_budget.reserve("chat")
             if not can_request:
-                try:
-                    time.sleep(random.uniform(0.6, 1.5))
-                    language = chat_language(event["text"])
-                    line = "sandali" if language == "tl" else "one sec" if language == "en" else "?"
-                    send_local(chat_command(event, line), args.queue_dir)
-                except Exception as exc:
-                    diagnostics.error("rate-limit reply failed: %s: %s", type(exc).__name__, exc)
+                diagnostics.info("chat skipped by request budget bot=%d", event["bot_slot"])
                 continue
             handled.append(now)
             last_request = now
@@ -738,16 +750,17 @@ def run(args, stop_event=None, shared_budget=None, provider_status=None):
                 choice = ask_provider(event, api_key, api_url, model, args.timeout,
                                       dialogue=conversations.recent(event))
             except Exception as exc:
-                connected = False
-                if provider_status is not None:
-                    provider_status.failed()
-                ready.unlink(missing_ok=True)
-                next_probe = time.monotonic() + 30.0
+                if not isinstance(exc, ValueError):
+                    connected = False
+                    if provider_status is not None:
+                        provider_status.failed()
+                    ready.unlink(missing_ok=True)
+                    next_probe = time.monotonic() + 30.0
                 diagnostics.error("provider request failed: %s: %s", type(exc).__name__, exc)
                 try:
                     time.sleep(random.uniform(0.6, 1.5))
                     language = chat_language(event["text"])
-                    line = "sandali lag ako" if language == "tl" else "sry lagging" if language == "en" else "?"
+                    line = "di ako sure" if language == "tl" else "not sure tbh" if language == "en" else "?"
                     send_local(chat_command(event, line), args.queue_dir)
                 except Exception as queue_exc:
                     diagnostics.error("fallback failed: %s: %s",
@@ -847,7 +860,7 @@ def main():
                         help="credential file (default: .env next to this script)")
     parser.add_argument("--queue-dir", type=Path,
                         help="instance queue directory (default: sibling ai directory of log-dir)")
-    parser.add_argument("--hourly-limit", type=int, default=30)
+    parser.add_argument("--hourly-limit", type=int, default=120)
     parser.add_argument("--event-hourly-limit", type=int, default=10)
     parser.add_argument("--max-event-variants", type=int, default=1000)
     parser.add_argument("--min-interval", type=float, default=8.0)

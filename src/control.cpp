@@ -379,7 +379,8 @@ int BotControl::cmdAi () {
    }
    const auto intent = arg <StringRef> (action);
    if (intent == "follow") {
-      if (!hasArg (argument) || !bot->m_isAlive) return BotCommandResult::BadFormat;
+      if (!hasArg (argument)) return BotCommandResult::BadFormat;
+      if (!bot->m_isAlive) return BotCommandResult::Handled;
       const auto task = bot->getCurrentTaskId ();
       if (task == Task::PlantBomb || task == Task::DefuseBomb || bot->m_hasHostage) {
          msg ("AI follow rejected: bot is busy with an objective.");
@@ -430,8 +431,7 @@ int BotControl::cmdAi () {
       msg ("AI dead chat requested for team.");
    }
    else if (intent == "chat") {
-      if (!hasArg (argument) || !hasArg (argument + 1)
-         || bot->m_commsStyle == CommsStyle::RadioOnly) return BotCommandResult::BadFormat;
+      if (!hasArg (argument) || !hasArg (argument + 1)) return BotCommandResult::BadFormat;
       const auto channel = arg <StringRef> (argument);
       if (channel != "team" && channel != "all") return BotCommandResult::BadFormat;
       auto lineArg = argument + 1;
@@ -448,22 +448,10 @@ int BotControl::cmdAi () {
             msg ("AI chat skipped: player left.");
             return BotCommandResult::Handled;
          }
-         const auto recipientAlive = game.isAliveEntity (recipient);
          const auto recipientTeam = game.getRealPlayerTeam (recipient);
-         if (bot->m_isAlive != recipientAlive || (channel == "team" && bot->m_team != recipientTeam)) {
-            Bot *replacement = nullptr;
-            for (const auto &candidate : bots) {
-               if (candidate->m_commsStyle == CommsStyle::RadioOnly
-                  || candidate->m_isAlive != recipientAlive
-                  || (channel == "team" && candidate->m_team != recipientTeam)) continue;
-               replacement = candidate.get ();
-               break;
-            }
-            if (!replacement) {
-               msg ("AI chat skipped: no visible bot available.");
-               return BotCommandResult::Handled;
-            }
-            bot = replacement;
+         if (channel == "team" && bot->m_team != recipientTeam) {
+            msg ("AI chat skipped: addressed bot is no longer visible to the player.");
+            return BotCommandResult::Handled;
          }
          ++lineArg;
       }
@@ -480,7 +468,8 @@ int BotControl::cmdAi () {
          logger.message ("[YaPB ai] chat dispatched bot=%d channel=%s alive=%d", bot->m_index,
             channel.chars (), bot->m_isAlive ? 1 : 0);
       }
-      msg ("AI chat requested.");
+      // The player sees the bot's actual chat; a console acknowledgement only
+      // adds noise and can suggest a reply happened before it was delivered.
    }
    else {
       return BotCommandResult::BadFormat;

@@ -452,6 +452,7 @@ void Bot::sendAddressedReply (StringRef message, bool teamOnly, bool fromAi) {
    // Purposeful messages work while the old random chat bank is disabled.
    // All callers use fixed strings, never text copied from a player.
    if (m_isCreature || message.empty () || (game.is (GameFlags::FreeForAll) && teamOnly)
+      || (teamOnly && !bots.hasHumanOnTeam (m_team))
       || (!fromAi && m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())) {
       return;
    }
@@ -463,11 +464,10 @@ void Bot::sendAddressedReply (StringRef message, bool teamOnly, bool fromAi) {
       bots.logAiEvent (this, nullptr, line, teamOnly, true);
       return;
    }
-   if (game.is (GameFlags::Legacy)) {
-      sendToChatLegacy (line, teamOnly);
-   }
-   else {
-      issueCommand ("%s \"%s\"", teamOnly ? "say_team" : "say", line);
+   if (m_speechQueue.length () >= 4) return;
+   m_speechQueue.emplaceLast (QueuedSpeech { line, teamOnly });
+   if (m_speechQueue.length () == 1) {
+      m_typingUntil = game.time () + cr::clamp (0.25f + static_cast <float> (line.length ()) * 0.018f, 0.45f, 1.25f);
    }
 }
 

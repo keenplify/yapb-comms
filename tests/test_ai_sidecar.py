@@ -268,9 +268,15 @@ class AiSidecarTests(unittest.TestCase):
             answer = sidecar.ask_provider(self.event, "key", "https://example.test/v1/chat/completions", "model", 6)
         self.assertEqual(answer, {"reply": "one b", "action": "none"})
         state = json.loads(payloads[0]["messages"][1]["content"])["bot_state"]
-        self.assertEqual(payloads[0]["max_tokens"], 256)
+        self.assertEqual(payloads[0]["max_tokens"], 128)
         self.assertEqual(state["weapon"], "weapon_ak47")
         self.assertEqual(state["visible_slots"], [4, 5])
+
+    def test_plain_and_fenced_provider_replies(self):
+        self.assertEqual(sidecar.parse_model_content("im from cali u"),
+                         {"reply": "im from cali u", "action": "none"})
+        self.assertEqual(sidecar.parse_model_content('```json\n{"reply":"yo","action":"none"}\n```'),
+                         {"reply": "yo", "action": "none"})
 
     def test_probe_checks_configured_model(self):
         class Response:
