@@ -987,8 +987,9 @@ void Bot::pushRadioMessage (int message) {
       nextSectorClear = game.time () + 30.0f;
    }
    const bool chatReady = m_lastTacticalChatTime <= 0.0f || m_lastTacticalChatTime + 10.0f <= game.time ();
-   const bool useChat = (m_commsStyle == CommsStyle::ChatOnly && chatReady)
-      || (m_commsStyle == CommsStyle::Both && (++m_commsSequence % 2 == 0) && chatReady);
+   const bool useChat = message != Radio::EnemySpotted
+      && ((m_commsStyle == CommsStyle::ChatOnly && chatReady)
+      || (m_commsStyle == CommsStyle::Both && (++m_commsSequence % 2 == 0) && chatReady));
    if (useChat) {
       const char *line = nullptr;
       switch (message) {
@@ -1005,7 +1006,6 @@ void Bot::pushRadioMessage (int message) {
       case Radio::StormTheFront: line = "Push forward."; break;
       case Radio::ReportInTeam: line = "Report in."; break;
       case Radio::RogerThat: line = "Copy."; break;
-      case Radio::EnemySpotted: line = "Enemy spotted."; break;
       case Radio::NeedBackup: line = "Need backup."; break;
       case Radio::SectorClear: line = "Sector clear."; break;
       case Radio::ImInPosition: line = "In position."; break;
@@ -1020,7 +1020,8 @@ void Bot::pushRadioMessage (int message) {
       }
       return;
    }
-   m_forceRadio = !game.is (GameFlags::HasBotVoice)
+   m_forceRadio = message == Radio::EnemySpotted
+      || !game.is (GameFlags::HasBotVoice)
       || !conf.hasChatterBank (message)
       || cv_radio_mode.as <int> () != 2; // use radio instead voice
 
@@ -1167,7 +1168,8 @@ void Bot::checkMsgQueue () {
          }
 
          if (m_radioSelect != kInvalidRadioSlot) {
-            if ((m_radioSelect != Radio::ReportingIn && m_forceRadio)
+            if (m_radioSelect == Radio::EnemySpotted
+               || (m_radioSelect != Radio::ReportingIn && m_forceRadio)
                || cv_radio_mode.as <int> () != 2
                || !conf.hasChatterBank (m_radioSelect)
                || !game.is (GameFlags::HasBotVoice)) {
@@ -3192,11 +3194,11 @@ void Bot::update () {
    m_isAlive = game.isAliveEntity (ent ());
    if (!m_isAlive && m_pendingDeathLineTime > 0.0f && m_pendingDeathLineTime <= game.time ()) {
       m_pendingDeathLineTime = 0.0f;
-      if (game.is (GameFlags::FreeForAll)) {
+      if (m_commsStyle != CommsStyle::RadioOnly && game.is (GameFlags::FreeForAll)) {
          constexpr const char *lines[] = { "ouch", "wp", "got me" };
          sendAddressedReply (lines[rg (0, 2)], false);
       }
-      else {
+      else if (m_commsStyle != CommsStyle::RadioOnly) {
          constexpr const char *lines[] = { "My bad.", "Unlucky.", "Nice try." };
          sendTeamCallout (lines[m_index % 3]);
       }

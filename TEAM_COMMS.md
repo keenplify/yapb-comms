@@ -11,10 +11,15 @@ chat is off (`yb_chat 0`); prerecorded chatter is reduced to standard radio
 
 ## Communication styles and channels
 
-Bots get a stable radio-only, chat-only, or alternating radio/chat style from
-their player slot. Purposeful text callouts are at most 30 characters and have
-a 10-second per-bot cooldown. Tactical text is always sent with `say_team`;
-radio is team-only too. The alternating style uses one channel for each message,
+At most two bots per team initiate text chat: one chat-first speaker and one
+alternating radio/chat speaker. Other bots use radio for routine callouts but
+can still answer when addressed by name. Enemy-spotted reports always use the
+standard radio, including map-location sightings. Purposeful text callouts are
+at most 30 characters and have a 10-second per-bot cooldown. Tactical text is
+always sent with `say_team`; radio is team-only too. With a human teammate, an
+assigned quiet captain uses the closest standard radio call for buy and route
+plans. The alternating style uses
+one channel for each message,
 never both for the same callout. Random bot chat remains disabled.
 Bot text chat is lowercase, including acknowledgements and round messages.
 
@@ -24,7 +29,7 @@ one is responding. A message in `say` gets a short `say` reply; a message in `sa
 gets a `say_team` reply. A complete bot name or unique first name takes priority.
 Short followups stay with that bot; ambiguous names get no substitute reply.
 Replies have a per-player cooldown so one conversation does not block another.
-Radio-only bots do not type. All-chat messages cannot issue tactical orders.
+Radio-only bots do not initiate text. All-chat messages cannot issue tactical orders.
 Human team-chat orders that are recognized take priority over social replies.
 For example, `is everyone a bot?` gets a short, deliberately ambiguous answer
 from one chat-capable bot, such as `Maybe.` or `You tell me.`. The answer uses

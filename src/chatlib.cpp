@@ -427,7 +427,7 @@ static void normalizeBotChat (String &line) {
 void Bot::sendToChat (StringRef message, bool teamOnly) {
    // this function prints saytext message to all players
 
-   if (m_isCreature || message.empty () || !cv_chat) {
+   if (m_isCreature || m_commsStyle == CommsStyle::RadioOnly || message.empty () || !cv_chat) {
       return;
    }
 
@@ -445,6 +445,7 @@ void Bot::sendToChat (StringRef message, bool teamOnly) {
 }
 
 void Bot::sendTeamCallout (StringRef message) {
+   if (m_commsStyle == CommsStyle::RadioOnly) return;
    sendAddressedReply (message, true);
 }
 

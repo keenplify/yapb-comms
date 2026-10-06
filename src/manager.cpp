@@ -377,6 +377,26 @@ Bot *BotManager::findAliveBot () {
 void BotManager::frame () {
    // this function calls showframe function for all available at call moment bots
 
+   int teamSpeakers[kGameTeamNum] {};
+   int freeForAllSpeakers = 0;
+   for (const auto &bot : m_bots) {
+      int *speakers = nullptr;
+      if (bot->m_isCreature) {
+         bot->m_commsStyle = CommsStyle::RadioOnly;
+         continue;
+      }
+      if (game.is (GameFlags::FreeForAll)) {
+         speakers = &freeForAllSpeakers;
+      }
+      else if (bot->m_team == Team::CT || bot->m_team == Team::Terrorist) {
+         speakers = &teamSpeakers[bot->m_team];
+      }
+      // Two regular speakers per team; teammates still answer when addressed.
+      bot->m_commsStyle = speakers && *speakers < 2
+         ? ((*speakers)++ == 0 ? CommsStyle::ChatOnly : CommsStyle::Both)
+         : CommsStyle::RadioOnly;
+   }
+
    for (const auto &bot : m_bots) {
       bot->frame ();
    }
@@ -741,13 +761,20 @@ void BotManager::maintainCaptains () {
          Bot *captain = nullptr;
          for (const auto &bot : bots) {
             if (!bot->m_isAlive || bot->m_team != team || bot->m_isCreature
-               || (bot->m_lastTacticalChatTime > 0.0f
+               || (bot->m_commsStyle != CommsStyle::RadioOnly
+                  && bot->m_lastTacticalChatTime > 0.0f
                   && bot->m_lastTacticalChatTime + 10.0f > game.time ())) continue;
             if (!captain || bot->pev->frags > captain->pev->frags) captain = bot.get ();
          }
          if (!captain) continue;
          const char *line = m_teamData[team].positiveEco ? "buy" : "eco";
-         captain->sendTeamCallout (line);
+         if (hasHumanOnTeam (team)) {
+            if (captain->m_commsStyle == CommsStyle::RadioOnly) {
+               captain->pushRadioMessage (m_teamData[team].positiveEco
+                  ? Radio::GoGoGo : Radio::StickTogetherTeam);
+            }
+            else captain->sendTeamCallout (line);
+         }
          m_botCaptainIndex[team] = captain->m_index;
          m_economyCallSent[team] = true;
          if (cv_comms_debug) logger.message ("[YaPB comms] economy captain=%d team=%d line=%s",
@@ -789,7 +816,8 @@ void BotManager::maintainCaptains () {
          if (debugTick) logger.message ("[YaPB comms] team=%d eligible=%d", team, eligible);
          continue;
       }
-      if (captain->m_lastTacticalChatTime > 0.0f
+      if (captain->m_commsStyle != CommsStyle::RadioOnly
+         && captain->m_lastTacticalChatTime > 0.0f
          && captain->m_lastTacticalChatTime + 10.0f > game.time ()) {
          if (debugTick) logger.message ("[YaPB comms] team=%d captain chat cooldown", team);
          continue;
@@ -819,7 +847,13 @@ void BotManager::maintainCaptains () {
          if (toMid) ++sentMid;
          else ++sentSite;
       }
-      captain->sendTeamCallout (split ? "3 b, 2 mid" : "rush b");
+      if (hasHumanOnTeam (team)) {
+         if (captain->m_commsStyle == CommsStyle::RadioOnly) {
+            captain->pushRadioMessage (split
+               ? Radio::GetInPositionAndWaitForGo : Radio::StormTheFront);
+         }
+         else captain->sendTeamCallout (split ? "3 b, 2 mid" : "rush b");
+      }
       m_botCaptainIndex[team] = captain->m_index;
       if (cv_comms_debug) logger.message ("[YaPB comms] captain=%d team=%d plan=%s bots=%d",
          captain->m_index, team, split ? "3B2mid" : "rushB", eligible);
@@ -845,9 +879,7 @@ void BotManager::maintainEnemyCallouts () {
 
    for (const auto &bot : bots) {
       if (!bot->m_isAlive || bot->m_isCreature || !(bot->m_states & Sense::SeeingEnemy)
-         || game.isNullEntity (bot->m_enemy)
-         || (bot->m_lastTacticalChatTime > 0.0f
-            && bot->m_lastTacticalChatTime + 10.0f > game.time ())) continue;
+         || game.isNullEntity (bot->m_enemy)) continue;
       const int team = bot->m_team;
       if (team != Team::CT && team != Team::Terrorist) continue;
       if (!game.isAliveEntity (bot->m_enemy)
@@ -875,7 +907,7 @@ void BotManager::maintainEnemyCallouts () {
             && bot->seesEntity (client.ent->v.origin)) ++count;
       }
       if (count == 0) continue;
-      bot->sendTeamCallout (strings.format ("%d %s", count, labels[place]));
+      bot->pushRadioMessage (Radio::EnemySpotted);
       m_lastEnemyReportTime[team][place] = game.time ();
       if (cv_comms_debug) logger.message ("[YaPB comms] sighting bot=%d team=%d count=%d place=%s",
          bot->m_index, team, count, labels[place]);
@@ -1919,7 +1951,7 @@ Bot::Bot (edict_t *bot, int difficulty, int personality, int team, int skin) {
    m_forceRadio = false;
 
    m_index = clientIndex - 1;
-   m_commsStyle = m_index % 3;
+   m_commsStyle = CommsStyle::RadioOnly;
    m_startAction = BotMsg::None;
    m_retryJoin = 0;
    m_moneyAmount = 0;

@@ -13,8 +13,8 @@ Metamod. The server package used for validation loads
 5. In your existing `yapb.cfg`, set `yb_chat "0"` and `yb_radio_mode "1"`.
    Preserve your other settings.
 6. Start the server and try `say_team rotate b`, `say_team hold`, and
-   `say_team bot, follow me`. Address a chat-capable bot in `say` and
-   `say_team`; check that its reply uses the same channel. Hit a teammate bot
+   `say_team bot, follow me`. Address a bot by name in `say` and
+   `say_team`; even a quiet bot should reply in the same channel. Hit a teammate bot
    once and check that any text reaction appears only in team chat.
    Ask `is everyone a bot?` in either chat channel and check that one bot
    answers briefly in that channel. Try `hello` and `whyy are no one
@@ -35,10 +35,11 @@ Metamod. The server package used for validation loads
     when a bot engages an enemy. Set `yb_bhop "0"` to turn it off.
 11. On a demolition map with a verified B route, stay silent for 12 seconds
     after round start. Early in the round, expect one `buy` or `eco` team call
-    matching YaPB's team economy. With two to four available bots, the
-    highest-scoring living bot should then call `rush b` in team chat and the
+    matching YaPB's team economy from a chatty captain; a quiet captain uses
+    standard radio. With two to four available bots, the highest-scoring living
+    bot should then call `rush b` in team chat or use radio if quiet, and the
     bots should move. With exactly five available bots and a Middle route,
-    expect `3 b, 2 mid`.
+    expect `3 b, 2 mid` in chat or a positioning radio call.
     One other bot should acknowledge. In the next round, use `say_team go A`
     before 12 seconds; one bot should acknowledge and no bot captain call
     should follow. Try an unavailable recognized order and expect one negative
@@ -52,8 +53,8 @@ Metamod. The server package used for validation loads
     `yb_comms_debug 0` after testing. The same log records `[YaPB ai] queue
     accepted` and `chat dispatched` for sidecar replies. Stock `sector clear`
     radio is limited to CT bomb searches, at most once every 30 seconds per team.
-13. Let bots see one or two enemies near Middle, A, or B. Expect one short
-    team-chat sighting with the visible count, such as `2 mid`, and a
+13. Let bots see one or two enemies near Middle, A, or B. Expect standard
+    `Enemy spotted` radio rather than a team-chat sighting, and a
     `[YaPB comms] sighting` entry in the log. Repeated sightings at the same
     place should be suppressed for 12 seconds.
 14. Send a recognized `say_team` order and expect exactly one acknowledgement
