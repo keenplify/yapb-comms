@@ -1076,7 +1076,11 @@ void Bot::checkMsgQueue () {
    case BotMsg::Buy: // general buy message
 
       // buy weapon
-      if (m_nextBuyTime > game.time ()) {
+      if (m_nextBuyTime > game.time ()
+         || (m_buyState == BuyState::PrimaryWeapon
+            && game.mapIs (MapFlags::Demolition)
+            && !game.is (GameFlags::FreeForAll | GameFlags::CSDM)
+            && bots.getBuyReleaseTime (m_team) + m_firstBuyOffset > game.time ())) {
          // keep sending message
          pushMsgQueue (BotMsg::Buy);
          return;
@@ -3092,7 +3096,7 @@ void Bot::frame () {
    if (gameState.isBombPlanted () && m_team == Team::CT && m_isAlive) {
       const auto &bombPosition = gameState.getBombOrigin ();
 
-      if (!m_hasProgressBar
+      if (!m_savingWeapon && !m_hasProgressBar
          && getCurrentTaskId () != Task::EscapeFromBomb
          && pev->origin.distanceSq (bombPosition) < cr::sqrf (1540.0f)
          && !isBombDefusing (bombPosition)) {
@@ -3843,6 +3847,12 @@ void Bot::takeDamage (edict_t *inflictor, int damage, int armor, int bits) {
 
    if (game.isPlayerEntity (inflictor) || (cv_attack_monsters && game.isMonsterEntity (inflictor))) {
       const auto inflictorTeam = game.getPlayerTeam (inflictor);
+
+      if (damage > 0 && !game.is (GameFlags::FreeForAll) && game.isPlayerEntity (inflictor)
+         && !game.isFakeClientEntity (inflictor) && inflictorTeam == m_team) {
+         m_lastFriendlyAttackerSlot = game.indexOfPlayer (inflictor);
+         m_lastFriendlyHitTime = game.time ();
+      }
 
       if (!game.isMonsterEntity (inflictor) && cv_tkpunish && inflictorTeam == m_team && !game.isFakeClientEntity (inflictor)) {
          // alright, die you team killer!!!

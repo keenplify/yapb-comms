@@ -60,6 +60,8 @@ private:
    int m_botCaptainIndex[kGameTeamNum] {};
    float m_economyCallTime[kGameTeamNum] {};
    bool m_economyCallSent[kGameTeamNum] {};
+   float m_buyReleaseTime[kGameTeamNum] {};
+   bool m_saveCallSent[kGameTeamNum] {};
    float m_nextCommsDebugTime {};
    Vector m_debugBotOrigin[kGameMaxPlayers] {};
    float m_debugBotMovedTime[kGameMaxPlayers] {};
@@ -163,6 +165,10 @@ public:
    void maintainAutoKill ();
    void maintainLeaders ();
    void maintainCaptains ();
+   void maintainWeaponSaves ();
+   float getBuyReleaseTime (int team) const {
+      return team >= 0 && team < kGameTeamNum ? m_buyReleaseTime[team] : 0.0f;
+   }
    void maintainEnemyCallouts ();
    void maintainRoundChat ();
    void maintainKillReactions ();

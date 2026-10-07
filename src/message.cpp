@@ -230,6 +230,7 @@ void MessageDispatcher::netMsgMoney () {
    else if (amount >= INT32_MAX) {
       amount = 16000;
    }
+   if (m_bot->m_inBuyZone && amount < m_bot->m_moneyAmount) m_bot->m_boughtThisRound = true;
    m_bot->m_moneyAmount = amount;
 }
 

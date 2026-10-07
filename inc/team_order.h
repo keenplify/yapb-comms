@@ -111,7 +111,7 @@ inline TeamOrder parseTeamOrder (const char *raw) {
    const auto equals = [&text] (const char *phrase) { return std::strcmp (text, phrase) == 0; };
    if (equals ("eco")) return TeamOrder::Eco;
    if (equals ("force") || equals ("force buy")) return TeamOrder::Force;
-   if (equals ("full buy")) return TeamOrder::FullBuy;
+   if (equals ("buy") || equals ("full buy")) return TeamOrder::FullBuy;
    if (equals ("save")) return TeamOrder::Save;
    if (equals ("half buy")) return TeamOrder::HalfBuy;
    if (equals ("drop")) return TeamOrder::Drop;
@@ -204,6 +204,7 @@ inline TeamOrder parseTeamOrder (const char *raw) {
 
    if (starts (command, "buy me") || (starts (command, "drop") && has (command, "me"))) return TeamOrder::BuyMe;
    if (starts (command, "full buy")) return TeamOrder::FullBuy;
+   if (std::strcmp (command, "buy") == 0) return TeamOrder::FullBuy;
    if (starts (command, "half buy")) return TeamOrder::HalfBuy;
    if (starts (command, "force")) return TeamOrder::Force;
    if (starts (command, "eco")) return TeamOrder::Eco;

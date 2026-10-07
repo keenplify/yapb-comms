@@ -38,6 +38,10 @@ so it does not incur model latency or cost.
 When a human teammate hits a bot, chat-capable bots say `Watch your fire.` in
 team chat. The old team-attack text bank could name an unrelated teammate when
 its `%t` lookup missed the attacker; it is no longer used for this reaction.
+If that same player says `sorry`, `sry`, or `my bad` within 20 seconds, the
+hurt bot answers directly with `all good, just watch your fire`. This reply
+works even while the earlier warning's chat cooldown is active. Radio-only
+bots acknowledge with standard radio.
 
 ## Provider-neutral vocabulary
 
@@ -175,7 +179,7 @@ or raw player message.
 | `rotate a/b`, `go a/b`, `leave a/b` | Bots navigate to the named bombsite when a verified map callout and a nearby YaPB graph node exist. `leave a` routes to B and vice versa. |
 | `watch mid`, `watch apps`, `watch back` | Bots navigate to a matching named place and hold for 45 seconds when that place exists on the map. |
 | `eco`, `save` | Bots stop further purchases when in the buy zone. |
-| `force`, `force buy`, `full buy` | Bots run their normal purchase sequence without team eco suppression when in the buy zone. Purchases remain limited by actual money. |
+| `buy`, `force`, `force buy`, `full buy` | Bots run their normal purchase sequence without team eco suppression when in the buy zone. Purchases remain limited by actual money. |
 | `drop` | One nearby bot drops its currently equipped primary weapon. |
 | `drop ak pls`, `drop awp`, `drop awm`, `drop m4`, `drop deag` | A nearby bot with good economy drops the requested gun during buy time. It may buy one first when its team is allowed to buy it. All 24 standard CS 1.6 firearms are recognized, including pistols, SMGs, shotguns, rifles, snipers, and the M249. Knife, C4, and grenades cannot be dropped through normal CS 1.6 weapon dropping. |
 | `can u jump`, `can you jump`, `jump` | The nearest teammate bot within 512 units jumps when on the ground. |
@@ -198,7 +202,13 @@ Early in a demolition round, a living bot calls `buy` or `eco` in team chat
 using YaPB's team economy decision, which also governs normal bot purchases.
 The call is skipped if a human has already taken captaincy with a tactical
 order. This economy call takes the place of the social pre-round line for that
-team. The economy captain speaks in text even if its normal style is radio-only.
+team. A radio-only captain uses the closest standard radio call.
+Bots now start their first purchase pass at least 2.5 seconds after the economy
+call, with a small individual stagger. If no call is available, they use the
+scheduled call time as a fallback so the buy queue still proceeds.
+If a human calls `buy` or `eco` after a bot has already spent money this round,
+one affected bot says `i already bought, sorry`. An eco call still stops any
+remaining purchases; a buy call does not restart a completed buy sequence.
 That bot also makes the later route call if still alive and available; a new
 highest-scoring eligible bot takes over if the captain cannot continue.
 If a team's humans have not chatted for 12 seconds during a demolition round,
@@ -262,7 +272,24 @@ nearby, YaPB's existing defend-position logic takes over. This addresses the
 old behavior where post-plant defense was chosen only when a bot happened to
 pick a new goal, and its defend-node search could fail from far away.
 
+When a teammate is actively planting, a Terrorist bot with smoke can throw it
+toward a recently seen enemy approach. The throw must have a valid trajectory
+and land clear of the planter. Bots avoid a blind throw when no approach is
+known.
+
+In a heavily outnumbered late round, bots with a primary weapon and poor
+economy move to cover to preserve it. This applies to CTs after a plant and
+Terrorists near the round timer's end. A live defuse or C4 carrier keeps the
+team on the objective. One eligible bot asks teammates to save their weapons;
+radio-only bots use the fallback radio command.
+
 ## Movement personality
+
+On each newly noticed enemy, the bot now chooses between the normal reaction
+delay and a brief panic response with equal probability. Panic lets it fire
+immediately, but its aim drifts for about a second, so early shots are less
+reliable. The choice is held for that encounter rather than changing every
+frame.
 
 `yb_bhop 1` enables occasional bunny-hop bursts while a bot is running a
 normal navigation, move, or follow task. A burst has at most three jumps on

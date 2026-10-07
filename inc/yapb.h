@@ -370,6 +370,7 @@ private:
    Vector m_prevOrigin {}; // origin some frames before
    Vector m_lookAt {}; // vector bot should look at
    Vector m_throw {}; // origin of node to throw grenades
+   Vector m_plantCoverSmokeTarget {}; // approach to screen while a teammate plants
    Vector m_enemyOrigin {}; // target origin chosen for shooting
    Vector m_grenade {}; // calculated vector for grenades
    Vector m_entity {}; // origin of entities like buttons etc
@@ -645,6 +646,7 @@ public:
    float m_timeTeamOrder {}; // time of last radio command
    float m_slowFrameTimestamp {}; // time to per-second think
    float m_nextBuyTime {}; // next buy time
+   float m_firstBuyOffset {}; // stagger after the team economy call
    float m_checkDarkTime {}; // check for darkness time
    float m_preventFlashing {}; // bot turned away from flashbang
    float m_blindTime {}; // time when bot is blinded
@@ -673,6 +675,10 @@ public:
    float m_actualReactionTime {}; // time of current reaction time
    float m_reactionLastVisible[kGameMaxPlayers + 1] {};
    float m_reactionReadyAt[kGameMaxPlayers + 1] {};
+   float m_reactionPanicUntil[kGameMaxPlayers + 1] {};
+   float m_panicUntil {}; // short inaccurate firing window for this engagement
+   float m_nextPanicAimUpdate {};
+   Vector m_panicAimOffset {};
    float m_nextReactionScan {};
    float m_recentKillAt {};
    float m_flickErrorUntil {};
@@ -712,6 +718,7 @@ public:
    float m_pendingDeathLineTime {}; // optional short dead-team reaction
    float m_lastDefuseCalloutTime {}; // one cover request per defuse attempt
    bool m_postPlantRepositioned {}; // far-side T routed toward planted site
+   bool m_savingWeapon {}; // preserving a primary weapon during a lost retake
    float m_nextPostPlantRouteTime {}; // throttle retries after interrupted routes
    float m_nextBhopBurstTime {}; // next optional burst window
    float m_nextBhopKnifeSwitchTime {}; // throttle diagnostic knife draw
@@ -749,6 +756,9 @@ public:
    bool m_inVIPZone {}; // bot in the vip safety zone
    bool m_buyingFinished {}; // done with buying
    bool m_buyPending {}; // bot buy is pending
+   bool m_boughtThisRound {}; // confirmed money spent during this round
+   int m_lastFriendlyAttackerSlot { -1 };
+   float m_lastFriendlyHitTime {};
    bool m_hasDefuser {}; // does bot has defuser
    bool m_hasNVG {}; // does bot has nightvision goggles
    bool m_usesNVG {}; // does nightvision goggles turned on
@@ -814,7 +824,7 @@ public:
    void dropWeaponForUser (edict_t *user, bool discardC4);
    void sendToChat (StringRef message, bool teamOnly);
    void sendTeamCallout (StringRef message);
-   void sendAddressedReply (StringRef message, bool teamOnly, bool fromAi = false);
+   void sendAddressedReply (StringRef message, bool teamOnly, bool fromAi = false, bool direct = false);
    bool requestJump ();
    bool declineOptionalOrder ();
    void sendToChatLegacy (StringRef message, bool teamOnly);

@@ -449,19 +449,19 @@ void Bot::sendTeamCallout (StringRef message) {
    sendAddressedReply (message, true);
 }
 
-void Bot::sendAddressedReply (StringRef message, bool teamOnly, bool fromAi) {
+void Bot::sendAddressedReply (StringRef message, bool teamOnly, bool fromAi, bool direct) {
    // Purposeful messages work while the old random chat bank is disabled.
    // All callers use fixed strings, never text copied from a player.
    if (m_isCreature || message.empty () || (game.is (GameFlags::FreeForAll) && teamOnly)
       || (teamOnly && !bots.hasHumanOnTeam (m_team))
-      || (!fromAi && m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())) {
+      || (!fromAi && !direct && m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())) {
       return;
    }
    m_lastTacticalChatTime = game.time ();
    String line { message };
    normalizeBotChat (line);
    if (line.empty ()) return;
-   if (!fromAi && cv_ai_bridge && bots.aiBridgeReady ()) {
+   if (!fromAi && !direct && cv_ai_bridge && bots.aiBridgeReady ()) {
       bots.logAiEvent (this, nullptr, line, teamOnly, true);
       return;
    }

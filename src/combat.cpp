@@ -453,8 +453,14 @@ bool Bot::lookupEnemies () {
             const bool aggressive = m_personality == Personality::Rusher || m_agressionLevel >= m_fearLevel;
             const float base = cv_whose_your_daddy ? 0.05f
                : rg (m_difficultyData->reaction[0], m_difficultyData->reaction[1]);
-
-            m_reactionReadyAt[targetIndex] = game.time () + base * (aggressive ? 0.7f : 1.0f);
+            if (rg.chance (50)) {
+               m_reactionReadyAt[targetIndex] = game.time ();
+               m_reactionPanicUntil[targetIndex] = game.time () + rg (0.75f, 1.25f);
+            }
+            else {
+               m_reactionReadyAt[targetIndex] = game.time () + base * (aggressive ? 0.7f : 1.0f);
+               m_reactionPanicUntil[targetIndex] = 0.0f;
+            }
          }
          m_reactionLastVisible[targetIndex] = game.time ();
       }
@@ -608,13 +614,17 @@ bool Bot::lookupEnemies () {
             && m_reactionReadyAt[targetIndex] > 0.0f
             && m_reactionLastVisible[targetIndex] + 0.45f >= game.time ()) {
             m_enemySurpriseTime = m_reactionReadyAt[targetIndex];
-         }
-         else if (targetIndex >= 0 && targetIndex < kGameMaxPlayers) {
-            m_enemySurpriseTime = game.time () + rg (m_difficultyData->reaction[0], m_difficultyData->reaction[1]);
+            m_panicUntil = m_reactionPanicUntil[targetIndex];
          }
          else {
-            m_enemySurpriseTime = game.time () + m_actualReactionTime * (cv_whose_your_daddy ? 0.5f : 1.0f);
+            const bool panic = rg.chance (50);
+            m_enemySurpriseTime = panic ? game.time () : game.time () +
+               (targetIndex >= 0 && targetIndex < kGameMaxPlayers
+                  ? rg (m_difficultyData->reaction[0], m_difficultyData->reaction[1])
+                  : m_actualReactionTime * (cv_whose_your_daddy ? 0.5f : 1.0f));
+            m_panicUntil = panic ? game.time () + rg (0.75f, 1.25f) : 0.0f;
          }
+         m_nextPanicAimUpdate = 0.0f;
 
          // A quick post-kill flick can be imperfect even when the second
          // player's reaction timer has already elapsed.
@@ -859,6 +869,15 @@ Vector Bot::getEnemyBodyOffset () {
    }
    if (m_flickErrorUntil > game.time () && game.isPlayerEntity (m_enemy)) {
       spot += m_flickOffset;
+   }
+   if (m_panicUntil > game.time () && !usesKnife ()) {
+      if (m_nextPanicAimUpdate <= game.time ()) {
+         const float spread = cr::clamp (distance * 0.06f, 28.0f, 72.0f);
+         m_panicAimOffset = Vector (rg (-spread, spread), rg (-spread, spread),
+            rg (-spread * 0.5f, spread * 0.5f));
+         m_nextPanicAimUpdate = game.time () + rg (0.18f, 0.32f);
+      }
+      spot += m_panicAimOffset;
    }
    return spot;
 }
@@ -2408,6 +2427,49 @@ void Bot::checkGrenadesThrow () {
    auto clearThrowStates = [] (uint32_t &states) {
       states &= ~(Sense::ThrowExplosive | Sense::ThrowFlashbang | Sense::ThrowSmoke);
    };
+
+   // Cover a teammate's plant before considering offensive grenades. Aim at a
+   // recently observed approach, never at the planter or an unknown location.
+   if (tid != Task::ThrowSmoke) m_plantCoverSmokeTarget.clear ();
+   if (tid != Task::ThrowSmoke && !isGrenadeMode && m_team == Team::Terrorist
+      && game.mapIs (MapFlags::Demolition) && !gameState.isBombPlanted ()
+      && tid != Task::PlantBomb && !m_isUsingGrenade && !m_isReloading
+      && !isInNarrowPlace () && !cv_ignore_enemies
+      && m_grenadeCheckTime < game.time ()
+      && (pev->weapons & cr::bit (Weapon::Smoke))
+      && !m_lastEnemyOrigin.empty ()
+      && m_seeEnemyTime + 8.0f > game.time ()
+      && !(m_states & Sense::SeeingEnemy)) {
+      auto coverPlant = [&] (const Vector &plantPos) {
+         const float throwDistance = pev->origin.distanceSq2d (m_lastEnemyOrigin);
+         if (pev->origin.distanceSq2d (plantPos) > cr::sqrf (900.0f)
+            || plantPos.distanceSq2d (m_lastEnemyOrigin) < cr::sqrf (350.0f)
+            || throwDistance < cr::sqrf (200.0f)
+            || throwDistance > cr::sqrf (kGrenadeDamageRadius * 3.0f)) return false;
+         auto velocity = calcThrow (getEyesPos (), m_lastEnemyOrigin);
+         if (velocity.lengthSq () < 100.0f) velocity = calcToss (getEyesPos (), m_lastEnemyOrigin);
+         if (velocity.empty ()) return false;
+         m_plantCoverSmokeTarget = m_lastEnemyOrigin;
+         m_states |= Sense::ThrowSmoke;
+         m_grenadeCheckTime = game.time () + kGrenadeCheckTime;
+         startTask (Task::ThrowSmoke, TaskPri::Throw, kInvalidNodeIndex,
+            game.time () + kGrenadeCheckTime * 3.6f, false);
+         return true;
+      };
+      for (const auto &teammate : bots) {
+         if (teammate.get () == this || !teammate->m_isAlive
+            || teammate->m_team != m_team || teammate->getCurrentTaskId () != Task::PlantBomb) continue;
+         if (coverPlant (teammate->pev->origin)) return;
+      }
+      for (const auto &client : util.getClients ()) {
+         if (!(client.flags & ClientFlags::Used) || !(client.flags & ClientFlags::Alive)
+            || client.team != m_team || !client.ent || bots[client.ent]
+            || !(client.ent->v.weapons & cr::bit (Weapon::C4))
+            || !((client.ent->v.button | client.ent->v.oldbuttons) & IN_ATTACK)
+            || !client.ent->v.viewmodel.str ().endsWith ("v_c4.mdl")) continue;
+         if (coverPlant (client.origin)) return;
+      }
+   }
 
    // check if throwing a grenade is a good thing to do...
    const auto throwingCondition = isGrenadeMode

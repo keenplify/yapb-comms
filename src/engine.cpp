@@ -1180,6 +1180,7 @@ void Game::slowFrame () {
    // maintain leaders selection upon round start
    bots.maintainLeaders ();
    bots.maintainCaptains ();
+   bots.maintainWeaponSaves ();
    bots.maintainEnemyCallouts ();
    bots.maintainKillReactions ();
    bots.maintainRoundChat ();

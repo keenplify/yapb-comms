@@ -777,6 +777,7 @@ void BotManager::maintainCaptains () {
          }
          m_botCaptainIndex[team] = captain->m_index;
          m_economyCallSent[team] = true;
+         m_buyReleaseTime[team] = cr::max (m_buyReleaseTime[team], game.time () + 2.5f);
          if (cv_comms_debug) logger.message ("[YaPB comms] economy captain=%d team=%d line=%s",
             captain->m_index, team, line);
       }
@@ -865,6 +866,86 @@ void BotManager::maintainCaptains () {
       ack.accepted = true;
       ack.due = game.time () + rg (1.5f, 2.8f);
       if (m_pendingOrderAcks.length () < 32) m_pendingOrderAcks.push (ack);
+   }
+}
+
+void BotManager::maintainWeaponSaves () {
+   if (!game.mapIs (MapFlags::Demolition) || game.is (GameFlags::FreeForAll)
+      || gameState.isRoundOver ()) return;
+   const bool planted = gameState.isBombPlanted ();
+   const int team = planted ? Team::CT : Team::Terrorist;
+   const float timeLeft = planted ? gameState.getBombTimeLeft ()
+      : gameState.getRoundEndTime () - game.time ();
+
+   int aliveCT = 0;
+   int aliveT = 0;
+   bool liveCarrier = false;
+   for (const auto &client : util.getClients ()) {
+      if (!(client.flags & ClientFlags::Used) || !(client.flags & ClientFlags::Alive)) continue;
+      if (client.team == Team::CT) ++aliveCT;
+      else if (client.team == Team::Terrorist) {
+         ++aliveT;
+         if (client.ent && (client.ent->v.weapons & cr::bit (Weapon::C4))) liveCarrier = true;
+      }
+   }
+   if (planted || liveCarrier) {
+      for (const auto &bot : bots) {
+         if (bot->m_team != Team::Terrorist || !bot->m_savingWeapon) continue;
+         bot->m_savingWeapon = false;
+         bot->clearTask (Task::MoveToPosition);
+         bot->clearTask (Task::Camp);
+      }
+   }
+   if (!planted && liveCarrier) return;
+   if (timeLeft <= 0.0f || timeLeft > (planted ? 25.0f : 20.0f)) return;
+   const int allies = team == Team::CT ? aliveCT : aliveT;
+   const int enemies = team == Team::CT ? aliveT : aliveCT;
+   if (allies == 0 || allies > 2 || enemies < allies + 2) return;
+
+   // Preserve live objective attempts, even in a poor buy.
+   for (const auto &bot : bots) {
+      if (planted && bot->m_isAlive && bot->m_team == Team::CT
+         && (bot->getCurrentTaskId () == Task::DefuseBomb || bot->m_hasProgressBar)) return;
+      if (!planted && bot->m_isAlive && bot->m_team == Team::Terrorist && bot->m_hasC4) return;
+   }
+
+   Bot *speaker = nullptr;
+   bool saving = false;
+   for (const auto &bot : bots) {
+      if (!bot->m_isAlive || bot->m_team != team || bot->m_isCreature
+         || !bot->hasPrimaryWeapon ()
+         || bot->m_hasC4
+         || (m_teamData[team].positiveEco && bot->m_moneyAmount >= 3500)
+         || bot->getCurrentTaskId () == Task::EscapeFromBomb) continue;
+      if (!bot->m_savingWeapon) {
+         if (bot->m_lastEnemyOrigin.empty () && planted) bot->m_lastEnemyOrigin = gameState.getBombOrigin ();
+         if (bot->m_lastEnemyOrigin.empty ()) continue;
+         const int cover = bot->findCoverNode (1024.0f);
+         if (!graph.exists (cover)) continue;
+         bot->m_savingWeapon = true;
+         bot->m_fearLevel = 1.0f;
+         bot->m_agressionLevel = 0.0f;
+         bot->m_targetEntity = nullptr;
+         bot->m_position = graph[cover].origin;
+         bot->clearSearchNodes ();
+         bot->clearTask (Task::Camp);
+         bot->clearTask (Task::MoveToPosition);
+         bot->startTask (Task::Camp, 80.0f, kInvalidNodeIndex,
+            game.time () + timeLeft, true);
+         bot->startTask (Task::MoveToPosition, 80.0f, cover,
+            game.time () + timeLeft, true);
+      }
+      saving = true;
+      if (bot->m_commsStyle == CommsStyle::RadioOnly
+         || bot->m_lastTacticalChatTime <= 0.0f
+         || bot->m_lastTacticalChatTime + 10.0f <= game.time ()) {
+         if (!speaker || bot->pev->frags > speaker->pev->frags) speaker = bot.get ();
+      }
+   }
+   if (saving && speaker && !m_saveCallSent[team]) {
+      if (speaker->m_commsStyle == CommsStyle::RadioOnly) speaker->pushRadioMessage (Radio::TeamFallback);
+      else speaker->sendTeamCallout ("save your weapons, economy's bad");
+      m_saveCallSent[team] = true;
    }
 }
 
@@ -2392,6 +2473,8 @@ void Bot::newRound () {
    m_flashFeedbackPending = false;
    m_lastDefuseCalloutTime = 0.0f;
    m_postPlantRepositioned = false;
+   m_savingWeapon = false;
+   m_plantCoverSmokeTarget.clear ();
    m_nextPostPlantRouteTime = 0.0f;
    m_nextBhopBurstTime = game.time () + rg (4.0f, 8.0f);
    m_nextBhopKnifeSwitchTime = 0.0f;
@@ -2460,9 +2543,13 @@ void Bot::newRound () {
    m_flickErrorUntil = 0.0f;
    m_flickOffset.clear ();
    m_nextReactionScan = 0.0f;
+   m_panicUntil = 0.0f;
+   m_nextPanicAimUpdate = 0.0f;
+   m_panicAimOffset.clear ();
    for (int i = 0; i < kGameMaxPlayers; ++i) {
       m_reactionLastVisible[i] = 0.0f;
       m_reactionReadyAt[i] = 0.0f;
+      m_reactionPanicUntil[i] = 0.0f;
    }
    m_hasProgressBar = false;
    m_canSetAimDirection = true;
@@ -2622,8 +2709,12 @@ void Bot::newRound () {
 
    m_knifeAttackTime = game.time () + rg (1.3f, 2.6f);
    m_nextBuyTime = game.time () + rg (0.6f, 2.0f);
+   m_firstBuyOffset = rg (0.1f, 0.9f);
 
    m_buyPending = false;
+   m_boughtThisRound = false;
+   m_lastFriendlyAttackerSlot = -1;
+   m_lastFriendlyHitTime = 0.0f;
    m_inBombZone = false;
    m_ignoreBuyDelay = false;
    m_hasC4 = false;
@@ -3196,6 +3287,7 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
          }
          int issued = 0;
          int declined = 0;
+         Bot *alreadyBoughtSpeaker = nullptr;
          bool needsCallouts = false;
          bool needsFeature = false;
          const char *routeName = nullptr;
@@ -3244,6 +3336,14 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
             const bool busy = task == Task::PlantBomb || task == Task::DefuseBomb || bot->m_hasHostage;
             if (busy) {
                continue;
+            }
+            if ((order == TeamOrder::Eco || order == TeamOrder::Save
+               || order == TeamOrder::Force || order == TeamOrder::FullBuy)
+               && bot->m_boughtThisRound
+               && (!alreadyBoughtSpeaker
+                  || (alreadyBoughtSpeaker->m_commsStyle == CommsStyle::RadioOnly
+                     && bot->m_commsStyle != CommsStyle::RadioOnly))) {
+               alreadyBoughtSpeaker = bot.get ();
             }
             if (order == TeamOrder::FollowMe || order == TeamOrder::Trade
                || order == TeamOrder::Push || order == TeamOrder::Rush || order == TeamOrder::Swing) {
@@ -3310,9 +3410,11 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
             case TeamOrder::FullBuy:
                if (bot->m_inBuyZone && !gameState.isBombPlanted ()) {
                   m_teamData[team].positiveEco = true;
-                  bot->m_buyState = BuyState::PrimaryWeapon;
-                  bot->m_buyingFinished = false;
-                  bot->m_buyPending = false;
+                  if (!bot->m_boughtThisRound) {
+                     bot->m_buyState = BuyState::PrimaryWeapon;
+                     bot->m_buyingFinished = false;
+                     bot->m_buyPending = false;
+                  }
                   ++issued;
                }
                else {
@@ -3380,8 +3482,47 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
          else {
             game.clientPrint (ent, "YaPB: no available teammate bots.");
          }
-         acknowledgeTeamOrder (team, issued > 0);
+         if (alreadyBoughtSpeaker) {
+            if (alreadyBoughtSpeaker->m_commsStyle == CommsStyle::RadioOnly) {
+               alreadyBoughtSpeaker->pushRadioMessage (Radio::Negative);
+            }
+            else {
+               alreadyBoughtSpeaker->sendAddressedReply ("i already bought, sorry", true, false, true);
+            }
+         }
+         else acknowledgeTeamOrder (team, issued > 0);
          return;
+      }
+   }
+
+   // A short apology is addressed to the bot this player just damaged, even
+   // without a bot name or question. Keep it tied to the actual attacker.
+   if (!game.is (GameFlags::FreeForAll) && !game.isFakeClientEntity (ent)
+      && (cmd == "say" || cmd == "say_team")) {
+      char words[97] {};
+      bool question = false;
+      if (normalizeTeamPhrase (engfuncs.pfnCmd_Args (), words, question)
+         && (std::strcmp (words, "sorry") == 0 || std::strcmp (words, "sry") == 0
+            || std::strcmp (words, "my bad") == 0
+            || std::strcmp (words, "sorry bot") == 0
+            || std::strcmp (words, "sorry bots") == 0)) {
+         const int playerSlot = game.indexOfPlayer (ent);
+         const int team = game.getRealPlayerTeam (ent);
+         Bot *hurtBot = nullptr;
+         for (const auto &bot : bots) {
+            if (!bot->m_isAlive || bot->m_team != team || bot->m_isCreature
+               || bot->m_lastFriendlyAttackerSlot != playerSlot
+               || bot->m_lastFriendlyHitTime <= 0.0f
+               || bot->m_lastFriendlyHitTime + 20.0f < game.time ()) continue;
+            if (!hurtBot || bot->m_lastFriendlyHitTime > hurtBot->m_lastFriendlyHitTime) hurtBot = bot.get ();
+         }
+         if (hurtBot) {
+            hurtBot->m_lastFriendlyHitTime = 0.0f;
+            if (hurtBot->m_commsStyle == CommsStyle::RadioOnly) hurtBot->pushRadioMessage (Radio::RogerThat);
+            else hurtBot->sendAddressedReply ("all good, just watch your fire", cmd == "say_team", false, true);
+            m_lastAddressedReplyTime[playerSlot] = game.time ();
+            return;
+         }
       }
    }
 
@@ -3703,6 +3844,8 @@ void BotManager::initRound () {
       m_botCaptainIndex[team] = -1;
       m_economyCallTime[team] = game.time () + rg (1.5f, 2.5f);
       m_economyCallSent[team] = false;
+      m_buyReleaseTime[team] = m_economyCallTime[team] + 3.0f;
+      m_saveCallSent[team] = false;
       for (int place = 0; place < 3; ++place) m_lastEnemyReportTime[team][place] = 0.0f;
       m_lastQueuedAckTime[team] = 0.0f;
       m_preRoundChatTime[team] = cr::max (game.time () + rg (1.5f, 3.0f),

@@ -1287,10 +1287,10 @@ void Bot::throwSmoke_ () {
 
    ignoreCollision ();
 
-   Vector src = m_lastEnemyOrigin - pev->velocity;
+   Vector src = (m_plantCoverSmokeTarget.empty () ? m_lastEnemyOrigin : m_plantCoverSmokeTarget) - pev->velocity;
 
    // predict where the enemy is in secs
-   if (!game.isNullEntity (m_enemy)) {
+   if (m_plantCoverSmokeTarget.empty () && !game.isNullEntity (m_enemy)) {
       src = src + m_enemy->v.velocity;
    }
    m_grenade = (src - getEyesPos ()).normalize_apx ();

@@ -8,7 +8,7 @@ int main () {
    struct Case { const char *text; TeamOrder expected; };
    constexpr Case cases[] = {
       {"eco", TeamOrder::Eco}, {"force", TeamOrder::Force}, {"force buy", TeamOrder::Force},
-      {"full buy", TeamOrder::FullBuy}, {"save", TeamOrder::Save}, {"half buy", TeamOrder::HalfBuy},
+      {"buy", TeamOrder::FullBuy}, {"full buy", TeamOrder::FullBuy}, {"save", TeamOrder::Save}, {"half buy", TeamOrder::HalfBuy},
       {"drop", TeamOrder::Drop}, {"buy me", TeamOrder::BuyMe}, {"can you drop", TeamOrder::BuyMe},
       {"drop ak pls", TeamOrder::DropWeapon}, {"can you drop me an ak?", TeamOrder::DropWeapon},
       {"buy me ak47", TeamOrder::DropWeapon}, {"drop awp pls", TeamOrder::DropWeapon},
@@ -53,6 +53,7 @@ int main () {
    assert (parseTeamOrder ("let's leave A") == TeamOrder::LeaveA);
    assert (parseTeamOrder ("hold here please") == TeamOrder::Hold);
    assert (parseTeamOrder ("we need to eco this round") == TeamOrder::Eco);
+   assert (parseTeamOrder ("bots buy") == TeamOrder::FullBuy);
    assert (parseTeamOrder ("can you drop me?") == TeamOrder::BuyMe);
    assert (parseTeamOrder ("can someone drop me?") == TeamOrder::BuyMe);
    assert (parseTeamOrder ("watch middle please") == TeamOrder::WatchMid);
