@@ -616,23 +616,23 @@ void BotConfig::loadDifficultyConfig () {
 
    // initialize defaults
    m_difficulty[Difficulty::Noob] = {
-      { 0.8f, 1.0f }, 5, 0, 0, 38, { 30.0f, 30.0f, 40.0f }
+      { 1.0f, 1.5f }, 5, 0, 0, 40, { 24.0f, 24.0f, 12.0f }
    };
 
    m_difficulty[Difficulty::Easy] = {
-      { 0.6f, 0.8f }, 30, 10, 10, 32, { 15.0f, 15.0f, 24.0f }
+      { 0.6f, 1.0f }, 10, 0, 0, 35, { 16.0f, 16.0f, 8.0f }
    };
 
    m_difficulty[Difficulty::Normal] = {
-      { 0.4f, 0.6f }, 50, 30, 40, 26, { 5.0f, 5.0f, 10.0f }
+      { 0.35f, 0.65f }, 20, 0, 10, 30, { 8.0f, 8.0f, 5.0f }
    };
 
    m_difficulty[Difficulty::Hard] = {
-      { 0.2f, 0.4f }, 75, 60, 70, 23, { 0.0f, 0.0f, 0.0f }
+      { 0.22f, 0.4f }, 40, 20, 25, 25, { 4.0f, 4.0f, 3.0f }
    };
 
    m_difficulty[Difficulty::Expert] = {
-      { 0.1f, 0.2f }, 100, 90, 90, 21, { 0.0f, 0.0f, 0.0f }
+      { 0.15f, 0.28f }, 60, 40, 40, 21, { 2.0f, 2.0f, 2.0f }
    };
 
    // currently, mindelay, maxdelay, headprob, seenthruprob, heardthruprob, recoil, aim_error {x,y,z}

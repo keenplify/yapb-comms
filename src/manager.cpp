@@ -2329,21 +2329,21 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim, StringRef weapon
 
    // notice nearby to victim teammates, that attacker is near
    for (const auto &notify : bots) {
-      if (notify->m_difficulty >= Difficulty::Hard
-         && killerTeam != victimTeam
-         && notify->m_seeEnemyTime + 2.0f < game.time ()
-         && notify->m_isAlive
-         && notify->m_team == victimTeam
-         && game.isNullEntity (notify->m_enemy)
-         && game.isNullEntity (notify->m_lastEnemy)
-         && util.isVisible (killer->v.origin, notify->ent ())) {
-
-         // make bot look at last enemy position
-         notify->m_actualReactionTime = 0.0f;
-         notify->m_seeEnemyTime = game.time ();
-         notify->m_enemy = killer;
-         notify->m_lastEnemy = killer;
-         notify->m_lastEnemyOrigin = killer->v.origin;
+      if (!game.is (GameFlags::FreeForAll) && killerTeam != victimTeam
+         && notify->m_isAlive && notify->ent () != victim && notify->m_team == victimTeam
+         && victim->v.origin.distanceSq (notify->pev->origin) < cr::sqrf (800.0f)
+         && notify->isInViewCone (victim->v.origin) && notify->seesEntity (victim->v.origin)) {
+         notify->m_witnessedDeathOrigin = victim->v.origin;
+         notify->m_witnessedDeathUntil = game.time () + 15.0f;
+         // Approach a nearby cover node after a human-sized delay; acquire the
+         // attacker independently through the normal field-of-view/ray checks.
+         const int cover = notify->findDefendNode (victim->v.origin);
+         if (graph.exists (cover)
+            && graph[cover].origin.distanceSq (notify->pev->origin) < cr::sqrf (700.0f)) {
+            notify->m_supportOrigin = graph[cover].origin;
+            notify->m_supportReadyAt = game.time () + rg (0.5f, 1.0f);
+            notify->m_supportExpiresAt = game.time () + 4.0f;
+         }
       }
 
       if (notify->ent () == killer) {
@@ -2543,6 +2543,16 @@ void Bot::newRound () {
    m_flickErrorUntil = 0.0f;
    m_flickOffset.clear ();
    m_nextReactionScan = 0.0f;
+   m_bodyChoiceEnemy = nullptr;
+   m_aimSampleEnemy = nullptr;
+   m_nextCombatAimSample = 0.0f;
+   m_combatSettledAt = 0.0f;
+   m_underPressureUntil = 0.0f;
+   m_supportReadyAt = 0.0f;
+   m_supportExpiresAt = 0.0f;
+   m_witnessedDeathUntil = 0.0f;
+   m_nextSupportCheck = 0.0f;
+   m_nextRepositionTime = 0.0f;
    m_panicUntil = 0.0f;
    m_nextPanicAimUpdate = 0.0f;
    m_panicAimOffset.clear ();

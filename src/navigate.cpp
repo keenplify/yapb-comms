@@ -101,7 +101,8 @@ int Bot::findBestGoal () {
       return findGoalPost (hasMoreHostagesAround ? GoalTactic::Goal : GoalTactic::RescueHostage, defensiveNodes, offensiveNodes);
    }
    constexpr float kBehaviorBase = 30.0f;
-   const auto difficulty = static_cast <float> (m_difficulty);
+   // Easy aim should not make bots neglect map objectives.
+   constexpr float difficulty = 3.0f;
 
    offensive = m_agressionLevel * 100.0f;
    defensive = m_fearLevel * 100.0f;
@@ -140,7 +141,11 @@ int Bot::findBestGoal () {
             pushChatMessage (Chat::Plant);
             bots.clearBombSay (BombPlantedSay::ChatSay);
          }
-         return m_chosenGoalIndex = findBombNode ();
+         const int bombNode = findBombNode ();
+         if (graph.exists (bombNode) && graph[bombNode].origin.distanceSq (pev->origin) > cr::sqrf (900.0f)) {
+            sendTeamCallout ("Rotating.");
+         }
+         return m_chosenGoalIndex = bombNode;
       }
       defensive += kBehaviorBase + difficulty * 5.0f;
       offensive -= kBehaviorBase - difficulty * 0.5f;
@@ -207,7 +212,11 @@ int Bot::findBestGoalWhenBombAction () {
    if (!gameState.isBombPlanted () && !cv_ignore_objectives) {
       game.searchEntities ("classname", "weaponbox", [&] (edict_t *ent) {
          if (game.isEntityModelMatches (ent, "backpack.mdl")) {
-            result = graph.getNearest (game.getEntityOrigin (ent));
+            const auto bombPosition = game.getEntityOrigin (ent);
+            if (isInViewCone (bombPosition) && seesEntity (bombPosition)) {
+               sendTeamCallout ("Bomb spotted.");
+            }
+            result = graph.getNearest (bombPosition);
 
             if (graph.exists (result)) {
 
@@ -351,7 +360,7 @@ int Bot::findGoalPost (int tactic, IntArray *defensive, IntArray *offensive) {
    ensureCurrentNodeIndex ();
 
    // rusher bots does not care any danger (idea from pbmm)
-   if (m_personality == Personality::Rusher && !m_adaptStrategyActive) {
+   if (m_personality == Personality::Rusher && !m_adaptStrategyActive && m_witnessedDeathUntil <= game.time ()) {
       const auto randomGoal = goalChoices[rg (0, 3)];
 
       if (graph.exists (randomGoal)) {
@@ -378,6 +387,18 @@ int Bot::findGoalPost (int tactic, IntArray *defensive, IntArray *offensive) {
    // the most worst case
    if (goalChoices[0] == kInvalidNodeIndex) {
       return m_chosenGoalIndex = graph.random ();
+   }
+   // A witnessed teammate death discourages another blind push into the same
+   // area. Do not divert bomb carriers, rescue/VIP goals, or a planted objective.
+   if (m_witnessedDeathUntil > game.time () && !m_hasC4 && !m_isVIP && !m_hasHostage
+      && !gameState.isBombPlanted () && tactic != GoalTactic::Goal && tactic != GoalTactic::RescueHostage
+      && graph[goalChoices[0]].origin.distanceSq2d (m_witnessedDeathOrigin) < cr::sqrf (500.0f)) {
+      for (int i = 1; i < 4; ++i) {
+         if (graph.exists (goalChoices[i])
+            && graph[goalChoices[i]].origin.distanceSq2d (m_witnessedDeathOrigin) >= cr::sqrf (500.0f)) {
+            return m_chosenGoalIndex = goalChoices[i];
+         }
+      }
    }
    // Keep the normal preferred goal unless it is close to the area where this
    // bot was repeatedly killed and another valid goal is available.

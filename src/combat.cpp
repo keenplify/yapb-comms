@@ -197,7 +197,7 @@ bool Bot::checkBodyPartsWithOffsets (edict_t *target) {
    const auto ignoreFlags = m_isCreature ? TraceIgnore::None : (cv_aim_trace_consider_glass ? TraceIgnore::Monsters : TraceIgnore::Everything);
 
    const auto hitsTarget = [&] () -> bool {
-      return result.flFraction >= 1.0f || result.pHit == target;
+      return combatTraceClear (result.flFraction, result.pHit == target, result.fStartSolid, result.fAllSolid);
    };
 
    m_enemyParts = Visibility::None;
@@ -273,7 +273,7 @@ bool Bot::checkBodyPartsWithHitboxes (edict_t *target) {
    const auto &eyes = getEyesPos ();
 
    const auto hitsTarget = [&] () -> bool {
-      return result.flFraction >= 1.0f || result.pHit == target;
+      return combatTraceClear (result.flFraction, result.pHit == target, result.fStartSolid, result.fAllSolid);
    };
    m_enemyParts = Visibility::None;
 
@@ -345,7 +345,7 @@ bool Bot::hasDirectLineOfSight (edict_t *player) {
       // Ignore transparent glass, but not players/monsters. A solid world brush
       // or another player between us and the target must stop visual acquisition.
       game.testLine (eyes, spot, TraceIgnore::Glass, self, &result);
-      return result.pHit == player || result.flFraction >= 0.999f;
+      return combatTraceClear (result.flFraction, result.pHit == player, result.fStartSolid, result.fAllSolid);
    };
 
    auto body = player->v.origin;
@@ -389,8 +389,13 @@ void Bot::trackEnemies () {
    else {
       m_states &= ~Sense::SeeingEnemy;
 
+      if (!game.isNullEntity (m_enemy) && game.isAliveEntity (m_enemy)) {
+         sendTeamCallout ("Lost contact. Watching last position.");
+      }
       m_enemy = nullptr;
       m_enemyBodyPartSet = nullptr;
+      m_bodyChoiceEnemy = nullptr;
+      m_aimSampleEnemy = nullptr;
    }
 }
 
@@ -453,12 +458,12 @@ bool Bot::lookupEnemies () {
             const bool aggressive = m_personality == Personality::Rusher || m_agressionLevel >= m_fearLevel;
             const float base = cv_whose_your_daddy ? 0.05f
                : rg (m_difficultyData->reaction[0], m_difficultyData->reaction[1]);
-            if (rg.chance (50)) {
-               m_reactionReadyAt[targetIndex] = game.time ();
-               m_reactionPanicUntil[targetIndex] = game.time () + rg (0.75f, 1.25f);
+            if (rg.chance (combatBehavior (m_difficulty).earlyFirePercent)) {
+               m_reactionReadyAt[targetIndex] = game.time () + combatReactionDelay (base, true);
+               m_reactionPanicUntil[targetIndex] = m_reactionReadyAt[targetIndex] + rg (0.75f, 1.25f);
             }
             else {
-               m_reactionReadyAt[targetIndex] = game.time () + base * (aggressive ? 0.7f : 1.0f);
+               m_reactionReadyAt[targetIndex] = game.time () + combatReactionDelay (base * (aggressive ? 0.85f : 1.0f), false);
                m_reactionPanicUntil[targetIndex] = 0.0f;
             }
          }
@@ -585,7 +590,8 @@ bool Bot::lookupEnemies () {
       }
    }
 
-   if (newEnemy != nullptr && (game.isPlayerEntity (newEnemy) || (cv_attack_monsters && game.isMonsterEntity (newEnemy)))) {
+   if (newEnemy != nullptr && (game.isPlayerEntity (newEnemy) || (cv_attack_monsters && game.isMonsterEntity (newEnemy)))
+      && seesEnemy (newEnemy)) {
       bots.setCanPause (true);
 
       m_aimFlags |= AimFlags::Enemy;
@@ -603,7 +609,7 @@ bool Bot::lookupEnemies () {
          return true;
       }
       else {
-         if (m_seeEnemyTime + 3.0f < game.time () && (m_hasC4 || m_hasHostage || !game.isNullEntity (m_targetEntity))) {
+         if (m_seeEnemyTime + 3.0f < game.time ()) {
             pushRadioMessage (Radio::EnemySpotted);
          }
          m_targetEntity = nullptr; // stop following when we see an enemy...
@@ -617,12 +623,12 @@ bool Bot::lookupEnemies () {
             m_panicUntil = m_reactionPanicUntil[targetIndex];
          }
          else {
-            const bool panic = rg.chance (50);
-            m_enemySurpriseTime = panic ? game.time () : game.time () +
+            const bool panic = rg.chance (combatBehavior (m_difficulty).earlyFirePercent);
+            m_enemySurpriseTime = game.time () + combatReactionDelay (
                (targetIndex >= 0 && targetIndex < kGameMaxPlayers
                   ? rg (m_difficultyData->reaction[0], m_difficultyData->reaction[1])
-                  : m_actualReactionTime * (cv_whose_your_daddy ? 0.5f : 1.0f));
-            m_panicUntil = panic ? game.time () + rg (0.75f, 1.25f) : 0.0f;
+                  : m_actualReactionTime * (cv_whose_your_daddy ? 0.5f : 1.0f)), panic);
+            m_panicUntil = panic ? m_enemySurpriseTime + rg (0.75f, 1.25f) : 0.0f;
          }
          m_nextPanicAimUpdate = 0.0f;
 
@@ -745,12 +751,12 @@ bool Bot::lookupEnemies () {
 }
 
 Vector Bot::getBodyOffsetError (float distance) {
-   if (game.isNullEntity (m_enemy) || distance < kSprayDistanceX2) {
+   if (game.isNullEntity (m_enemy) || usesKnife ()) {
       return nullptr;
    }
 
    if (m_aimErrorTime < game.time ()) {
-      const float hitError = distance / (cr::clamp (static_cast <float> (m_difficulty), 1.0f, 4.0f) * 1280.0f);
+      const float hitError = cr::max (distance, 128.0f) / 480.0f * combatBehavior (m_difficulty).errorScale;
       const auto &maxs = m_enemy->v.maxs, &mins = m_enemy->v.mins;
 
       m_aimLastError = Vector (
@@ -790,7 +796,8 @@ Vector Bot::getEnemyBodyOffset () {
    Vector compensation = nullptr;
 
    if (!usesSniper () && !usesKnife () && distance > kSprayDistance) {
-      compensation = (m_enemy->v.velocity - pev->velocity) * m_frameInterval * 2.8f;
+      compensation = m_difficulty >= Difficulty::Hard
+         ? (m_enemy->v.velocity - pev->velocity) * m_frameInterval : Vector {};
       compensation.z = 0.0f;
    }
    else {
@@ -808,7 +815,7 @@ Vector Bot::getEnemyBodyOffset () {
    }
    else if (game.isPlayerEntity (m_enemy)) {
       // now take in account different parts of enemy body
-      if (m_enemyParts & (Visibility::Head | Visibility::Body)) {
+      if ((m_enemyParts & (Visibility::Head | Visibility::Body)) == (Visibility::Head | Visibility::Body)) {
          auto headshotPct = m_difficultyData->headshotPct;
 
          // with to much recoil or using specific weapons choice to aim to the chest
@@ -819,9 +826,12 @@ Vector Bot::getEnemyBodyOffset () {
             headshotPct = 0;
          }
 
-         // now check is our skill match to aim at head, else aim at enemy body
-         if (m_enemyBodyPartSet == m_enemy
-            || ((m_enemyBodyPartSet != m_enemy) && rg.chance (headshotPct))) {
+         // Roll once per target, not once per frame until every bot chooses a headshot.
+         if (m_bodyChoiceEnemy != m_enemy) {
+            m_bodyChoiceEnemy = m_enemy;
+            m_enemyBodyPartSet = rg.chance (headshotPct) ? m_enemy : nullptr;
+         }
+         if (m_enemyBodyPartSet == m_enemy && headshotPct > 0 && m_panicUntil <= game.time ()) {
 
             spot = headOrigin (m_enemy, distance);
 
@@ -851,20 +861,11 @@ Vector Bot::getEnemyBodyOffset () {
          spot = headOrigin (m_enemy, distance);
       }
    }
-   auto idealSpot = spot;
-
-   if (m_difficulty < Difficulty::Hard && isEnemyInSight (idealSpot)) {
-      spot = idealSpot + ((spot - idealSpot) * 0.005f); // gradually adjust the aiming direction
-   }
+   // Store observed information before applying motor error. Hidden targets must
+   // never refresh this position from their live entity.
+   m_lastEnemyOrigin = m_enemyOrigin;
    spot += compensation;
-
-   if (usesKnife () && m_difficulty >= Difficulty::Normal) {
-      spot = m_enemyOrigin;
-   }
-   m_lastEnemyOrigin = spot;
-
-   // add some error to unskilled bots
-   if (m_difficulty < Difficulty::Normal) {
+   if (!usesKnife ()) {
       spot += getBodyOffsetError (distance);
    }
    if (m_flickErrorUntil > game.time () && game.isPlayerEntity (m_enemy)) {
@@ -872,12 +873,22 @@ Vector Bot::getEnemyBodyOffset () {
    }
    if (m_panicUntil > game.time () && !usesKnife ()) {
       if (m_nextPanicAimUpdate <= game.time ()) {
-         const float spread = cr::clamp (distance * 0.06f, 28.0f, 72.0f);
+         const float spread = cr::clamp (distance * 0.06f, 18.0f, 96.0f)
+            * (0.4f + combatBehavior (m_difficulty).errorScale);
          m_panicAimOffset = Vector (rg (-spread, spread), rg (-spread, spread),
             rg (-spread * 0.5f, spread * 0.5f));
          m_nextPanicAimUpdate = game.time () + rg (0.18f, 0.32f);
       }
-      spot += m_panicAimOffset;
+      const float remaining = cr::clamp ((m_panicUntil - game.time ()) / 1.25f, 0.0f, 1.0f);
+      spot += m_panicAimOffset * remaining;
+   }
+   if (!usesKnife ()) {
+      if (m_aimSampleEnemy != m_enemy || m_nextCombatAimSample <= game.time ()) {
+         m_aimSampleEnemy = m_enemy;
+         m_sampledCombatAim = spot;
+         m_nextCombatAimSample = game.time () + combatBehavior (m_difficulty).trackingInterval;
+      }
+      return m_sampledCombatAim;
    }
    return spot;
 }
@@ -1121,11 +1132,15 @@ bool Bot::needToPauseFiring (float distance) {
    const float tolerance = (100.0f - static_cast <float> (m_difficulty) * 25.0f) / 99.0f;
    const float baseTime = distance > kSprayDistance ? 0.55f : 0.38f;
    const float maxRecoil = static_cast <float> (m_difficultyData->maxRecoil);
+   // Inexperienced bots overcommit to their opening spray, then need longer recovery.
+   if (m_difficulty <= Difficulty::Normal && m_panicUntil > game.time () && !usesPistol ()) {
+      return false;
+   }
 
    // check if we need to compensate recoil
    if (cr::tanf (cr::sqrtf (cr::abs (xPunch) + cr::abs (yPunch))) * distance > offset + maxRecoil + tolerance) {
       if (m_firePause < game.time ()) {
-         m_firePause = game.time () + rg (baseTime, baseTime + maxRecoil * 0.01f * tolerance) - m_frameInterval;
+         m_firePause = game.time () + rg (baseTime, baseTime + maxRecoil * 0.01f * tolerance) + combatBehavior (m_difficulty).trackingInterval - m_frameInterval;
       }
       return true;
    }
@@ -1355,6 +1370,11 @@ void Bot::doFireWeapons () {
       return;
    }
 
+   if (!game.isNullEntity (m_enemy) && !hasDirectLineOfSight (m_enemy)) {
+      m_wantsToFire = false;
+      pev->button &= ~(IN_ATTACK | IN_ATTACK2);
+      return;
+   }
    // the bots wants to fire at something?
    if (m_shootAtDeadTime > game.time () || (m_wantsToFire && !m_isUsingGrenade && m_shootTime <= game.time ())) {
       fireWeapons (); // if bot didn't fire a bullet try again next frame
@@ -1493,10 +1513,27 @@ void Bot::focusEnemy () {
       return;
    }
 
+   // The target may have moved behind cover since the last sensing tick.
+   if (!(m_states & Sense::SeeingEnemy) || !seesEnemy (m_enemy)) {
+      sendTeamCallout ("Lost contact. Watching last position.");
+      m_enemy = nullptr;
+      m_bodyChoiceEnemy = nullptr;
+      m_aimSampleEnemy = nullptr;
+      m_states &= ~Sense::SeeingEnemy;
+      m_aimFlags &= ~AimFlags::Enemy;
+      m_wantsToFire = false;
+      if (!m_lastEnemyOrigin.empty ()) m_lookAt = m_lastEnemyOrigin;
+      return;
+   }
+   if (m_aimSampleEnemy != m_enemy) {
+      m_combatSettledAt = game.time () + combatBehavior (m_difficulty).settleSeconds;
+      m_aimErrorTime = 0.0f;
+   }
    // aim for the head and/or body
    m_lookAt = getEnemyBodyOffset ();
 
    if (m_enemySurpriseTime > game.time ()) {
+      m_wantsToFire = false;
       return;
    }
    const float distanceSq = m_lookAt.distanceSq2d (getEyesPos ()); // how far away is the enemy scum?
@@ -1504,6 +1541,14 @@ void Bot::focusEnemy () {
    const float dot = util.getConeDeviation (ent (), m_enemyOrigin);
    const float enemyDot = util.getConeDeviation (m_enemy, pev->origin);
 
+   if (!usesKnife () && !usesSniper () && m_panicUntil > game.time ()) {
+      m_wantsToFire = dot > 0.94f; // about 20 degrees: fire while still correcting
+      return;
+   }
+   if (!usesKnife () && m_combatSettledAt > game.time ()) {
+      m_wantsToFire = false;
+      return;
+   }
    if (distanceSq < cr::sqrf (128.0f) && !usesSniper ()) {
       if (usesKnife ()) {
          if (distanceSq < cr::sqrf (80.0f)) {
@@ -1575,7 +1620,7 @@ void Bot::attackMovement () {
    else if ((m_states & Sense::SuspectEnemy) && !(m_states & Sense::SeeingEnemy)) {
       approach = 49;
    }
-   else if (m_isReloading || m_isVIP || m_infectedEnemyTeam) {
+   else if (m_isReloading || m_isVIP || m_infectedEnemyTeam || m_underPressureUntil > game.time ()) {
       approach = 29;
    }
    else {
@@ -1587,15 +1632,16 @@ void Bot::attackMovement () {
    }
    const bool isEnemyCone = isInViewCone (m_enemy->v.origin);
 
-   // only take cover when bomb is not planted and enemy can see the bot or the bot is VIP
-   if (!game.is (GameFlags::CSDM) && !isKnifeMode ()) {
+   // Brief survival retreats remain useful after a plant when reloading or badly hurt.
+   if (!isKnifeMode () && (!game.is (GameFlags::CSDM) || m_isReloading || m_underPressureUntil > game.time ())) {
       if ((m_states & Sense::SeeingEnemy)
          && approach < 30
-         && !gameState.isBombPlanted ()
-         && (isEnemyCone || m_isVIP || m_isReloading || m_infectedEnemyTeam)) {
+         && (!gameState.isBombPlanted () || m_isReloading || m_underPressureUntil > game.time ())
+         && (isEnemyCone || m_isVIP || m_isReloading || m_infectedEnemyTeam || m_underPressureUntil > game.time ())) {
 
          if (m_retreatTime < game.time ()) {
-            startTask (Task::SeekCover, TaskPri::SeekCover, kInvalidNodeIndex, 0.0f, true);
+            sendTeamCallout (m_isReloading ? "Reloading. Cover me." : "Taking fire. Need help.");
+            startTask (Task::SeekCover, TaskPri::SeekCover, kInvalidNodeIndex, game.time () + 3.0f, true);
          }
 
          if (!checkWallOnBehind ()) {

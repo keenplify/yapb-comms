@@ -125,6 +125,18 @@ void Bot::updateLookAngles () {
    const float delta = cr::clamp (game.time () - m_lookUpdateTime, cr::kFloatEqualEpsilon, kViewFrameUpdate);
    m_lookUpdateTime = game.time ();
 
+   // A fast view update must not keep following a target cached before occlusion.
+   if ((m_aimFlags & AimFlags::Enemy) && !game.isNullEntity (m_enemy)
+      && !hasDirectLineOfSight (m_enemy)) {
+      sendTeamCallout ("Lost contact. Watching last position.");
+      m_lookAt = m_lastEnemyOrigin.empty () ? m_destOrigin : m_lastEnemyOrigin;
+      m_aimFlags &= ~AimFlags::Enemy;
+      m_states &= ~Sense::SeeingEnemy;
+      m_enemy = nullptr;
+      m_aimSampleEnemy = nullptr;
+      m_bodyChoiceEnemy = nullptr;
+      m_wantsToFire = false;
+   }
    // adjust all body and view angles to face an absolute vector
    Vector direction = (m_lookAt - getEyesPos ()).angles ();
    direction.x = -direction.x; // invert for engine
@@ -163,6 +175,12 @@ void Bot::updateLookAngles () {
       }
       stiffness += 100.0f;
       damping -= 5.0f;
+   }
+   if (importantAimFlags || m_wantsToFire) {
+      const auto behavior = combatBehavior (m_difficulty);
+      accelerate = behavior.turnAcceleration;
+      stiffness = behavior.turnStiffness;
+      damping = 28.0f;
    }
    m_idealAngles = pev->v_angle;
 
@@ -487,8 +505,7 @@ void Bot::setAimDirection () {
 
             return false;
          }
-         return isNodeValidForPredict (predictNode) && pathLength < cv_max_nodes_for_predict.as <int> ()
-            && numEnemiesNear (graph[predictNode].origin, 1024.0f) > 0;
+         return isNodeValidForPredict (predictNode) && pathLength < cv_max_nodes_for_predict.as <int> ();
       };
 
       if (changePredictedEnemy) {

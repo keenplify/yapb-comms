@@ -20,6 +20,7 @@ using namespace cr;
 #include <module.h>
 #include <constant.h>
 #include <chatlib.h>
+#include <combat_behavior.h>
 
 // tasks definition
 struct BotTask {
@@ -542,6 +543,7 @@ private:
    void doFireWeapons ();
    void handleWeapons (float distance, int index, int id, int choosen);
    void focusEnemy ();
+   void updateCombatSupport ();
    void selectBestWeapon ();
    void selectSecondary ();
    void selectWeaponById (int id);
@@ -676,6 +678,19 @@ public:
    float m_reactionLastVisible[kGameMaxPlayers + 1] {};
    float m_reactionReadyAt[kGameMaxPlayers + 1] {};
    float m_reactionPanicUntil[kGameMaxPlayers + 1] {};
+   edict_t *m_bodyChoiceEnemy {};
+   edict_t *m_aimSampleEnemy {};
+   Vector m_sampledCombatAim {};
+   float m_nextCombatAimSample {};
+   float m_combatSettledAt {};
+   float m_underPressureUntil {};
+   float m_supportReadyAt {};
+   float m_supportExpiresAt {};
+   Vector m_supportOrigin {};
+   Vector m_witnessedDeathOrigin {};
+   float m_witnessedDeathUntil {};
+   float m_nextSupportCheck {};
+   float m_nextRepositionTime {};
    float m_panicUntil {}; // short inaccurate firing window for this engagement
    float m_nextPanicAimUpdate {};
    Vector m_panicAimOffset {};

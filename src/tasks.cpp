@@ -417,6 +417,11 @@ void Bot::huntEnemy_ () {
 }
 
 void Bot::seekCover_ () {
+   if (getTask ()->time > 0.0f && getTask ()->time <= game.time ()) {
+      completeTask ();
+      m_retreatTime = game.time () + 1.0f;
+      return;
+   }
    m_aimFlags |= AimFlags::Nav;
 
    if (!game.isAliveEntity (m_lastEnemy)) {
@@ -431,7 +436,9 @@ void Bot::seekCover_ () {
       m_prevGoalIndex = kInvalidNodeIndex;
 
       // start hide task
-      startTask (Task::Hide, TaskPri::Hide, kInvalidNodeIndex, game.time () + rg (3.0f, 12.0f), false);
+      const float hideTime = gameState.isBombPlanted () || game.is (GameFlags::CSDM | GameFlags::FreeForAll)
+         ? rg (1.0f, 2.0f) : rg (2.0f, 4.0f);
+      startTask (Task::Hide, TaskPri::Hide, kInvalidNodeIndex, game.time () + hideTime, false);
 
       // get a valid look direction
       const auto &dest = getCampDirection (m_lastEnemyOrigin);
@@ -780,6 +787,12 @@ void Bot::hide_ () {
 }
 
 void Bot::moveToPos_ () {
+   if (getTask ()->time > 0.0f && getTask ()->time <= game.time ()) {
+      completeTask ();
+      m_position.clear ();
+      m_prevGoalIndex = kInvalidNodeIndex;
+      return;
+   }
    m_aimFlags |= AimFlags::Nav;
 
    if (isShieldDrawn ()) {

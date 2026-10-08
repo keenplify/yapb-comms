@@ -987,12 +987,13 @@ void Bot::pushRadioMessage (int message) {
       nextSectorClear = game.time () + 30.0f;
    }
    const bool chatReady = m_lastTacticalChatTime <= 0.0f || m_lastTacticalChatTime + 10.0f <= game.time ();
-   const bool useChat = message != Radio::EnemySpotted
-      && ((m_commsStyle == CommsStyle::ChatOnly && chatReady)
+   if (m_commsStyle == CommsStyle::ChatOnly && !chatReady) return;
+   const bool useChat = ((m_commsStyle == CommsStyle::ChatOnly && chatReady)
       || (m_commsStyle == CommsStyle::Both && (++m_commsSequence % 2 == 0) && chatReady));
    if (useChat) {
       const char *line = nullptr;
       switch (message) {
+      case Radio::EnemySpotted: line = "Contact. Enemy spotted."; break;
       case Radio::CoverMe: line = "Cover me."; break;
       case Radio::YouTakeThePoint: line = "Take point."; break;
       case Radio::HoldThisPosition: line = "Hold this position."; break;
@@ -1953,6 +1954,8 @@ void Bot::setConditions () {
 
    // does bot see an enemy?
    trackEnemies ();
+
+   updateCombatSupport ();
 
    // did bot just kill an enemy?
    if (!game.isNullEntity (m_lastVictim)) {
@@ -3844,6 +3847,9 @@ void Bot::takeDamage (edict_t *inflictor, int damage, int armor, int bits) {
       updatePracticeValue (damage);
    }
    m_lastDamageTimestamp = game.time ();
+   if (damage >= 20 || (damage > 0 && pev->health < 40.0f)) {
+      m_underPressureUntil = game.time () + rg (1.5f, 2.5f);
+   }
 
    if (game.isPlayerEntity (inflictor) || (cv_attack_monsters && game.isMonsterEntity (inflictor))) {
       const auto inflictorTeam = game.getPlayerTeam (inflictor);
@@ -3854,7 +3860,7 @@ void Bot::takeDamage (edict_t *inflictor, int damage, int armor, int bits) {
          m_lastFriendlyHitTime = game.time ();
       }
 
-      if (!game.isMonsterEntity (inflictor) && cv_tkpunish && inflictorTeam == m_team && !game.isFakeClientEntity (inflictor)) {
+      if (!game.isMonsterEntity (inflictor) && cv_tkpunish && inflictorTeam == m_team && !game.isFakeClientEntity (inflictor) && seesEnemy (inflictor)) {
          // alright, die you team killer!!!
          m_actualReactionTime = 0.0f;
          m_seeEnemyTime = game.time ();
@@ -3879,26 +3885,26 @@ void Bot::takeDamage (edict_t *inflictor, int damage, int armor, int bits) {
             m_agressionLevel += 0.1f;
 
             if (m_agressionLevel > 1.0f) {
-               m_agressionLevel += 1.0f;
+               m_agressionLevel = 1.0f;
             }
          }
          else {
             m_fearLevel += 0.03f;
 
             if (m_fearLevel > 1.0f) {
-               m_fearLevel += 1.0f;
+               m_fearLevel = 1.0f;
             }
          }
          clearTask (Task::Camp);
 
          if (game.isNullEntity (m_enemy) && m_team != inflictorTeam) {
             if (seesEnemy (inflictor)) {
-               m_enemy = inflictor;
+               // Acquisition and reaction are centralized in lookupEnemies.
+               // Damage must not grant an immediate shot at a new opponent.
                m_lastEnemy = inflictor;
-               m_enemyOrigin = inflictor->v.origin;
                m_lastEnemyOrigin = m_enemyOrigin;
-               m_seeEnemyTime = game.time ();
-               m_states |= Sense::SeeingEnemy;
+               m_heardSoundTime = game.time ();
+               m_states |= Sense::HearingEnemy;
             }
             else {
                // Damage reveals only an approximate source direction. Do not
@@ -4592,13 +4598,9 @@ void Bot::updateHearing () {
    // Hearing can suggest where to look, but only a real visual trace may
    // promote the player to m_enemy / SeeingEnemy.
    if (seesEnemy (m_hearedEnemy)) {
-      m_enemy = m_hearedEnemy;
+      // Let normal visual acquisition establish reaction/aim settling next tick.
       m_lastEnemy = m_hearedEnemy;
       m_lastEnemyOrigin = m_enemyOrigin;
-      m_states &= ~Sense::SuspectEnemy;
-      m_states |= Sense::SeeingEnemy;
-      m_aimFlags |= AimFlags::Enemy;
-      m_seeEnemyTime = game.time ();
       return;
    }
 
@@ -4840,5 +4842,60 @@ void Bot::donateC4ToHuman () {
 
       // make recipient friend "pickup" it
       MDLL_Touch (bomb, recipient);
+   }
+}
+
+// Nearby support uses teammates' visible activity and witnessed death locations,
+// never the killer's hidden position. Objectives and explicit orders retain priority.
+void Bot::updateCombatSupport () {
+   if (m_isCreature || m_hasC4 || m_hasHostage
+      || m_isVIP || gameState.isBombPlanted () || m_hasProgressBar
+      || m_timeTeamOrder > game.time () || m_radioOrder != 0 || m_savingWeapon
+      || getCurrentTaskId () != Task::Normal
+      || !game.isNullEntity (m_enemy) || m_isReloading || m_healthValue < 35.0f) {
+      return;
+   }
+   if (m_recentKillAt > 0.0f && m_recentKillAt + 3.0f > game.time ()
+      && m_recentKillAt + 0.6f < game.time () && m_nextRepositionTime <= game.time ()) {
+      m_nextRepositionTime = game.time () + 8.0f;
+      if (rg.chance (45)) {
+         const int cover = findDefendNode (pev->origin);
+         if (graph.exists (cover) && graph[cover].origin.distanceSq (pev->origin) < cr::sqrf (600.0f)
+            && graph[cover].origin.distanceSq (pev->origin) > cr::sqrf (96.0f)) {
+            startTask (Task::MoveToPosition, TaskPri::MoveToPosition, cover, game.time () + 3.0f, false);
+            return;
+         }
+      }
+   }
+   if (game.is (GameFlags::FreeForAll)) return;
+   if (m_supportReadyAt > 0.0f && m_supportReadyAt <= game.time ()) {
+      m_supportReadyAt = 0.0f;
+      if (m_supportExpiresAt > game.time ()) {
+         const int index = graph.getNearest (m_supportOrigin, 512.0f);
+         if (graph.exists (index)) {
+            sendTeamCallout ("Coming to help.");
+            startTask (Task::MoveToPosition, TaskPri::MoveToPosition, index, game.time () + 4.0f, false);
+            return;
+         }
+      }
+   }
+   if (m_nextSupportCheck > game.time ()) return;
+   m_nextSupportCheck = game.time () + rg (1.0f, 1.5f);
+   if (m_supportReadyAt <= 0.0f) {
+      for (const auto &client : util.getClients ()) {
+         if (!(client.flags & ClientFlags::Used) || !(client.flags & ClientFlags::Alive)
+            || !client.ent || client.ent == ent () || client.team != m_team) continue;
+         const auto teammate = client.ent;
+         const float distanceSq = teammate->v.origin.distanceSq (pev->origin);
+         const bool fighting = (teammate->v.button & IN_ATTACK) != 0;
+         const bool escort = (teammate->v.weapons & cr::bit (Weapon::C4)) != 0
+            && distanceSq > cr::sqrf (300.0f);
+         if ((!fighting && !escort) || distanceSq > cr::sqrf (700.0f)
+            || !isInViewCone (teammate->v.origin) || !seesEntity (teammate->v.origin)) continue;
+         m_supportOrigin = teammate->v.origin;
+         m_supportReadyAt = game.time () + rg (0.45f, 0.9f);
+         m_supportExpiresAt = game.time () + 4.0f;
+         break;
+      }
    }
 }

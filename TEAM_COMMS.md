@@ -400,3 +400,63 @@ until the new behavior is checked in game.
 
 For native Linux CS 1.6, build the 32-bit module with `-m32` (the local
 `build-comms-32/libyapb.so` was built this way).
+
+
+## Combat and situational communication tuning (2026-10-08)
+
+Mechanical aim is separate from objective decisions. Noob/Easy/Normal/Hard/Expert
+have early-fire probabilities of 85/70/40/20/10 percent. This means firing before
+alignment, not instant perception: every acquisition has at least 120 ms reaction
+time. Noob, Easy, and Normal bots may shoot toward the torso while still turning,
+use delayed tracking samples, overcommit to opening sprays, and take longer to
+recover from recoil. These effects decrease with each level. Snipers still need
+to settle before firing. Every difficulty has some
+positional error; lower levels have substantially more. Head/body preference is
+chosen once per target instead of rerolling every frame until a headshot wins.
+The shipped difficulty file and missing-file fallback now agree. Existing server
+copies of `difficulty.cfg` must be updated separately to use the new numeric
+reaction/headshot/error defaults; the code-level changes apply with the new plugin.
+
+Visibility requires a clear ray or a direct hit on the target, with neither a
+start-solid nor all-solid result. A 99.99%-complete blocked ray is not visibility.
+Aim and firing recheck visibility between sensing ticks. Hearing, damage and
+witnessed teammate deaths no longer grant an immediate combat target outside the
+normal acquisition/reaction path. Prediction uses the remembered position, without
+querying hidden enemies near a predicted node. Bots can still watch a last-seen
+corner or turn toward noisy footsteps; optional wallbangs use remembered/noisy
+positions, never live tracking through an opaque wall.
+
+Bots seek brief cover when reloading or taking heavy damage, including deathmatch.
+They may reposition after a kill. In team modes they can assist a visibly firing
+human or bot, escort a nearby visible bomb carrier, and react to a witnessed nearby
+teammate death after a delay. Death witnesses prefer alternative non-objective
+goals away from that location for 15 seconds. This is a goal preference, not a
+promise that every navigation graph has a separate safe route. Objective carriers,
+planted-bomb duties, and active orders take priority over optional support.
+
+Tactical chat has three variants per supported event, with no immediate repeated
+variant: contact, lost contact, reload, pressure, support, enemy down, bomb spotted,
+rotation, and common radio intents. Event triggers supply the facts; random wording
+does not invent enemy positions. Individual bots retain their 10-second cooldown;
+team callouts also have a 3-second gap and a 12-second repeat-event cooldown.
+Radio-only preferences and FFA suppression of team messages remain respected.
+The existing AI bridge may paraphrase these varied contextual messages when enabled.
+
+Validation:
+
+```sh
+rtk proxy cmake -S . -B build-comms-32 -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-m32
+rtk proxy cmake --build build-comms-32 -j4
+rtk proxy ctest --test-dir build-comms-32 --output-on-failure
+rtk proxy python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+The standalone tests check blocked-ray boundaries, nonzero reaction time,
+difficulty scaling, team event deduplication and clock resets, plus the existing
+order and bhop fixtures. They do not simulate the engine or establish gameplay
+balance. Before deployment, test a strafing player at close/mid/long range, brief
+corner peeks, a silent player moving behind an opaque wall, audible footsteps,
+reloads under fire, nearby teammate deaths, bomb plant/defuse, and FFA. Compare Easy
+and Hard at the same server tick rate. Confirm support ends promptly and callouts
+do not repeat across teammates. Linux x86 builds are verified locally; Windows and
+live-match behavior still require runtime validation.

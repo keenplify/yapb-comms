@@ -175,3 +175,19 @@ if(MSVC)
 	install(FILES $<TARGET_PDB_FILE:${PROJECT_NAME}>
 		DESTINATION "${GAME_DIR}/${SERVER_INSTALL_DIR}/" OPTIONAL)
 endif()
+
+# Standalone behavior tests do not require a running GoldSrc server.
+include(CTest)
+if(BUILD_TESTING AND NOT CMAKE_SYSTEM_NAME MATCHES "Emscripten")
+    foreach(test_name combat_behavior team_order bhop)
+        add_executable(${test_name}_test tests/${test_name}.cpp)
+        target_include_directories(${test_name}_test PRIVATE inc)
+        # The fixtures use assert; retain them in Release builds too.
+        if(MSVC)
+            target_compile_options(${test_name}_test PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${test_name}_test PRIVATE -UNDEBUG)
+        endif()
+        add_test(NAME ${test_name} COMMAND ${test_name}_test)
+    endforeach()
+endif()
