@@ -15,6 +15,8 @@ ConVar cv_user_max_followers ("user_max_followers", "1", "Specifies how many bot
 
 ConVar cv_jasonmode ("jasonmode", "0", "If enabled, all bots will be forced to use only the knife, skipping weapon buying routines.");
 ConVar cv_radio_mode ("radio_mode", "1", "Allows bots to use radio or chatter.\nAllowed values: '0', '1', '2'.\nIf '0', radio and chatter is disabled.\nIf '1', only radio allowed.\nIf '2' chatter and radio allowed.", true, 0.0f, 2.0f);
+extern ConVar cv_comms_debug;
+ConVar cv_ping_comms ("ping_comms", "1", "Choose one enemy report: observed count/location, radio, or competitive player ping.", true, 0.0f, 1.0f);
 ConVar cv_bhop ("bhop", "1", "Allows occasional difficulty-scaled bunny-hop bursts outside combat.");
 ConVar cv_bhop_test ("bhop_test", "0", "Debug only: bhop on every eligible movement opportunity. Disable after testing.", true, 0.0f, 1.0f);
 ConVar cv_ground_strafe_test ("ground_strafe_test", "0", "Debug only: pulse crouch and side movement on safe ground routes. Requires a high server tick rate.", true, 0.0f, 1.0f);
@@ -975,6 +977,34 @@ void Bot::pushRadioMessage (int message) {
    // this function inserts the radio message into the message queue
 
    if (cv_radio_mode.as <int> () == 0 || m_numFriendsLeft == 0 || m_isCreature) {
+      return;
+   }
+   if (message == Radio::EnemySpotted && cv_ping_comms
+      && engfuncs.pfnCVarGetFloat ("competitive_bot_reports") > 0.0f
+      && engfuncs.pfnCVarGetFloat ("competitive_player_ping") > 0.0f
+      && !game.is (GameFlags::FreeForAll)) {
+      static float nextTeamReport[kGameTeamNum] {};
+      const float now = game.time ();
+      if ((m_nextEnemyReportTime > now && m_nextEnemyReportTime - now <= 12.0f)
+         || (nextTeamReport[m_team] > now && nextTeamReport[m_team] - now <= 5.0f)) return;
+      // Use actual bot perception, never an exact-crosshair timer or remembered enemy.
+      if (!(m_states & Sense::SeeingEnemy) || game.isNullEntity (m_enemy)
+         || !game.isAliveEntity (m_enemy) || game.getRealPlayerTeam (m_enemy) == m_team
+         || !isInViewCone (m_enemy->v.origin) || !seesEntity (m_enemy->v.origin)) return;
+      m_nextEnemyReportTime = now + 12.0f;
+      nextTeamReport[m_team] = now + 5.0f;
+      const int channel = rg (0, 2);
+      if (cv_comms_debug) logger.message ("[YaPB comms] enemy report bot=%d target=%d channel=%d",
+         m_index + 1, game.indexOfPlayer (m_enemy) + 1, channel);
+      if (channel != 1) {
+         // AMXX validates visibility and resolves the enemy's NAV callout for chat.
+         game.serverCommand ("16competitive_bot_report %d %d %d", m_index + 1, game.indexOfPlayer (m_enemy) + 1, channel);
+         return;
+      }
+      // Bypass the usual personality chat conversion: this choice is radio only.
+      m_forceRadio = true;
+      m_radioSelect = Radio::EnemySpotted;
+      pushMsgQueue (BotMsg::Radio);
       return;
    }
    if (message == Radio::SectorClear) {

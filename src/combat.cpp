@@ -609,9 +609,7 @@ bool Bot::lookupEnemies () {
          return true;
       }
       else {
-         if (m_seeEnemyTime + 3.0f < game.time ()) {
-            pushRadioMessage (Radio::EnemySpotted);
-         }
+         const bool reportSighting = m_seeEnemyTime + 3.0f < game.time ();
          m_targetEntity = nullptr; // stop following when we see an enemy...
 
          const int targetIndex = game.isPlayerEntity (newEnemy) ? game.indexOfPlayer (newEnemy) : -1;
@@ -649,6 +647,7 @@ bool Bot::lookupEnemies () {
          m_enemyBodyPartSet = nullptr;
          m_lastEnemyOrigin = newEnemy->v.origin;
          m_enemyReachableTimer = 0.0f;
+         if (reportSighting) pushRadioMessage (Radio::EnemySpotted);
 
          // keep track of when we last saw an enemy
          m_seeEnemyTime = game.time ();

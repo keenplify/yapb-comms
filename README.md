@@ -10,3 +10,7 @@ It's a computer controlled players (bots) for the Counter-Strike b6.5 - 1.6 and 
 
 ## ☉ Waypoints
 All requests/bugs regarding bots navigation graph (waypoints) are located in this [repository](https://github.com/yapb/graph). if you have  waypoint request, please post an issue there.
+
+## Competitive enemy reports
+
+With the coordinated core (competitive_bot_reports=1) and yb_ping_comms=1, enemy sightings choose one of count + enemy NAV callout, Enemy spotted radio, or enemy ping. Count and ping commands go through the server-only 16competitive_bot_report bridge; ordinary bot client commands bypass AMXX and cannot provide this integration. Core validates current visibility/team/cooldowns and excludes FFA. A missing callout falls back to a ping. The default rate is 12 seconds per bot and five seconds per team; legacy AMXX polling is disabled in this build. yb_comms_debug=1 prints the selected channel; the core logs actual count callouts and marker creation. Build the 32-bit Linux module and ship it together with the updated core.

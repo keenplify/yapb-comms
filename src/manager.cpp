@@ -1052,6 +1052,12 @@ void BotManager::maintainEnemyCallouts () {
       if (team != Team::CT && team != Team::Terrorist) continue;
       if (!game.isAliveEntity (bot->m_enemy)
          || game.getRealPlayerTeam (bot->m_enemy) == team) continue;
+      if (engfuncs.pfnCVarGetFloat ("yb_ping_comms") > 0.0f
+         && engfuncs.pfnCVarGetFloat ("competitive_bot_reports") > 0.0f
+         && engfuncs.pfnCVarGetFloat ("competitive_player_ping") > 0.0f) {
+         bot->pushRadioMessage (Radio::EnemySpotted);
+         continue; // the shared sighting gate chooses exactly one delivery channel
+      }
       const Vector enemyPosition = bot->m_enemy->v.origin;
       int place = -1;
       float nearestDistance = cr::sqrf (750.0f);

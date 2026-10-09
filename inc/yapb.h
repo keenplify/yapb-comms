@@ -267,6 +267,7 @@ private:
    float m_timeDoorOpen {}; // time to next door open check
    float m_timeHitDoor {}; // specific time after hitting the door
    float m_lastChatTime {}; // time bot last chatted
+   float m_nextEnemyReportTime {}; // one spotting report per bot every 12 seconds
    float m_lastTacticalChatTime {}; // rate limit for purposeful bot messages
    IdleAimDrift m_idleAim {};
    struct EnemyDamageReport {
