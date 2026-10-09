@@ -35,6 +35,9 @@ jobs:
           cd release
           sha256sum yapb-linux-x86.so > yapb-linux-x86.so.sha256
 
+      - name: Test bot behavior
+        run: ctest --test-dir build-linux-x86 --output-on-failure
+
       - name: Save build artifact
         uses: actions/upload-artifact@v4
         with:

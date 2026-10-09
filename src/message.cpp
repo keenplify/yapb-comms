@@ -203,13 +203,14 @@ void MessageDispatcher::netMsgDamage () {
    enum args { armor = 0, health = 1, bits = 2, min = 3 };
 
    // check the minimum states
-   if (m_args.length () < min || !m_bot) {
+   if (m_args.length () < min || !m_recipient) {
       return;
    }
 
    // handle damage if any
    if (m_args[armor].long_ > 0 || m_args[health].long_) {
-      m_bot->takeDamage (m_bot->pev->dmg_inflictor, m_args[health].long_, m_args[armor].long_, m_args[bits].long_);
+      bots.recordEnemyDamage (m_recipient, m_args[health].long_);
+      if (m_bot) m_bot->takeDamage (m_bot->pev->dmg_inflictor, m_args[health].long_, m_args[armor].long_, m_args[bits].long_);
    }
 }
 
@@ -555,9 +556,10 @@ void MessageDispatcher::start (edict_t *ent, int32_t type) {
 
    // message for bot bot?
    if (!game.isNullEntity (ent) && !(ent->v.flags & FL_DORMANT)) {
+      m_recipient = ent;
       m_bot = bots[ent];
 
-      if (!m_bot) {
+      if (!m_bot && m_current != NetMsg::Damage) {
          stopCollection ();
          return;
       }

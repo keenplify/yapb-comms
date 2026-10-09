@@ -1,5 +1,17 @@
 # YaPB team comms test build
 
+Idle aim now wanders slowly by up to 3 degrees horizontally and 6 vertically,
+choosing a new offset every 2–4.5 seconds. Verify bots vary their eye level with
+no enemy, then regain precise aim on contact. Combat, recent contact, grenade
+throws, entity interactions, ladders, water, jumps, planting and defusing disable
+the variation. Combat aim/recoil and movement physics are unchanged.
+
+Navigation turns always take the shortest arc, discard opposing turn momentum
+when the aim point changes, and stop without overshooting. Navigation yaw is
+limited to 240 degrees/second (pitch 160); combat aim retains its existing
+controller. Check turns across the +/-180-degree heading boundary and tight
+route corners: bots should turn naturally without doing a full spin.
+
 This archive contains a 32-bit Linux `yapb.so`, optional approved aliases,
 and map callouts. It is for a native Linux Counter-Strike 1.6 server using
 Metamod. The server package used for validation loads
@@ -53,10 +65,20 @@ Metamod. The server package used for validation loads
     `yb_comms_debug 0` after testing. The same log records `[YaPB ai] queue
     accepted` and `chat dispatched` for sidecar replies. Stock `sector clear`
     radio is limited to CT bomb searches, at most once every 30 seconds per team.
-13. Let bots see one or two enemies near Middle, A, or B. Expect standard
-    `Enemy spotted` radio rather than a team-chat sighting, and a
+13. Let bots see one or two enemies near Middle, A, or B. Chat-capable bots
+    should report the visible count and the enemy's nearest named location,
+    such as `1 A` or `2 mid`; radio-only bots retain the
+    standard `Enemy spotted` radio. Location reports bypass AI paraphrasing
+    so the count and callout are preserved. Expect a
     `[YaPB comms] sighting` entry in the log. Repeated sightings at the same
     place should be suppressed for 12 seconds.
+    Land visible body shots without killing the enemy: after the burst, expect
+    `1 mid, low hp` after at least 60 confirmed health damage or `1 mid, one shot`
+    after at least 80. These are estimates from that bot's own hits, not reads
+    of enemy HP. Armor-only damage, unseen hits, and dead enemies must not
+    trigger them. Damage memory expires after ten seconds and resets on death
+    or a new round. Health reports keep a three-second team-chat spam limit
+    but can follow a recent sighting without waiting ten seconds.
 14. Send a recognized `say_team` order and expect exactly one acknowledgement
     after roughly 0.65–1.4 seconds. Start a CT bot defusing and expect
     `cover me.` in team chat near the start of its attempt.

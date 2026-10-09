@@ -6,6 +6,7 @@
 //
 
 #include <yapb.h>
+#include <navigation_aim.h>
 
 ConVar cv_max_nodes_for_predict ("max_nodes_for_predict", "22", "Maximum number of path nodes to predict the enemy.", true, 15.0f, 256.0f);
 ConVar cv_whose_your_daddy ("whose_your_daddy", "0", "Enables or disables extra hard difficulty for bots.");
@@ -141,10 +142,36 @@ void Bot::updateLookAngles () {
    Vector direction = (m_lookAt - getEyesPos ()).angles ();
    direction.x = -direction.x; // invert for engine
 
+   const auto task = getCurrentTaskId ();
+   const bool idleLook = m_isAlive && !m_isCreature
+      && game.isNullEntity (m_enemy) && !(m_states & Sense::SeeingEnemy)
+      && m_seeEnemyTime + 3.0f < game.time ()
+      && !(m_aimFlags & (AimFlags::Enemy | AimFlags::LastEnemy | AimFlags::PredictPath
+         | AimFlags::Grenade | AimFlags::Entity | AimFlags::Override))
+      && !m_isUsingGrenade && !isOnLadder () && !isInWater ()
+      && !(m_pathFlags & NodeFlag::Ladder) && !(m_currentTravelFlags & PathFlag::Jump)
+      && task != Task::PlantBomb && task != Task::DefuseBomb;
+   if (idleLook) {
+      if (game.time () >= m_idleAim.nextChange) {
+         m_idleAim.target (rg (-3.0f, 3.0f), rg (-6.0f, 6.0f));
+         m_idleAim.nextChange = game.time () + rg (2.0f, 4.5f);
+      }
+      m_idleAim.advance (delta);
+      direction.x += m_idleAim.pitch;
+      direction.y += m_idleAim.yaw;
+   }
+   else {
+      m_idleAim = {}; // precise aim takes over immediately
+   }
+
    direction.clampAngles ();
 
+   const bool navigationAim = !m_wantsToFire
+      && !(m_aimFlags & (AimFlags::Enemy | AimFlags::Grenade | AimFlags::Entity
+         | AimFlags::Override | AimFlags::LastEnemy | AimFlags::PredictPath));
+
    // lower skilled bot's have lower aiming
-   if (m_difficulty == Difficulty::Noob) {
+   if (m_difficulty == Difficulty::Noob && !navigationAim) {
       updateLookAnglesNewbie (direction, delta);
       updateBodyAngles ();
 
@@ -187,47 +214,29 @@ void Bot::updateLookAngles () {
    float angleDiffPitch = cr::anglesDifference (direction.x, m_idealAngles.x);
    float angleDiffYaw = cr::anglesDifference (direction.y, m_idealAngles.y);
 
-   // prevent reverse facing angles  when navigating normally
-   if (m_moveToGoal
-      && !importantAimFlags
-      && !m_pathOrigin.empty ()
-      && !isOnLadder ()) {
-
-      const float forward = (m_lookAt - pev->origin).yaw ();
-
-      if (!cr::fzero (forward)) {
-         const float current = cr::wrapAngle (pev->v_angle.y - forward);
-         const float target = cr::wrapAngle (direction.y - forward);
-
-         if (current * target < 0.0f) {
-            if (cr::abs (current - target) >= 180.0f) {
-               if (angleDiffYaw > 0.0f) {
-                  angleDiffYaw -= 360.0f;
-               }
-               else {
-                  angleDiffYaw += 360.0f;
-               }
-            }
-         }
-      }
-   }
-
-   if (cr::abs (angleDiffYaw) < 1.0f) {
-      m_lookYawVel = 0.0f;
-      m_idealAngles.y = direction.y;
+   if (navigationAim) {
+      m_idealAngles.y += navigationTurnStep (angleDiffYaw, m_lookYawVel, delta);
+      m_idealAngles.x += navigationTurnStep (angleDiffPitch, m_lookPitchVel, delta, 160.0f);
    }
    else {
-      const float accel = cr::clamp (stiffness * angleDiffYaw - damping * m_lookYawVel, -accelerate, accelerate);
+      if (cr::abs (angleDiffYaw) < 1.0f) {
+         m_lookYawVel = 0.0f;
+         m_idealAngles.y = direction.y;
+      }
+      else {
+         const float accel = cr::clamp (stiffness * angleDiffYaw - damping * m_lookYawVel, -accelerate, accelerate);
 
-      m_lookYawVel += delta * accel;
-      m_idealAngles.y += delta * m_lookYawVel;
+         m_lookYawVel += delta * accel;
+         m_idealAngles.y += delta * m_lookYawVel;
+      }
+      const float accel = cr::clamp (2.0f * stiffness * angleDiffPitch - damping * m_lookPitchVel, -accelerate, accelerate);
+
+      m_lookPitchVel += delta * accel;
+      m_idealAngles.x += delta * m_lookPitchVel;
    }
-   const float accel = cr::clamp (2.0f * stiffness * angleDiffPitch - damping * m_lookPitchVel, -accelerate, accelerate);
-
-   m_lookPitchVel += delta * accel;
-   m_idealAngles.x += delta * m_lookPitchVel;
 
    m_idealAngles.x = cr::clamp (m_idealAngles.x, -89.0f, 89.0f);
+   m_idealAngles.y = cr::wrapAngle (m_idealAngles.y);
 
    pev->v_angle = m_idealAngles;
    pev->v_angle.z = 0.0f;

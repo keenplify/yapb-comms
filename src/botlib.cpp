@@ -993,7 +993,12 @@ void Bot::pushRadioMessage (int message) {
    if (useChat) {
       const char *line = nullptr;
       switch (message) {
-      case Radio::EnemySpotted: line = "Contact. Enemy spotted."; break;
+      case Radio::EnemySpotted: {
+         const auto sighting = bots.enemySightingCallout (this);
+         // Keep the observed count and location intact through delivery.
+         if (!sighting.empty ()) sendTeamCallout (sighting, true);
+         return;
+      }
       case Radio::CoverMe: line = "Cover me."; break;
       case Radio::YouTakeThePoint: line = "Take point."; break;
       case Radio::HoldThisPosition: line = "Hold this position."; break;
@@ -3164,7 +3169,14 @@ void Bot::update () {
 
    if (!m_speechQueue.empty () && m_typingUntil <= game.time ()) {
       const QueuedSpeech line = m_speechQueue.popFront ();
-      if (game.is (GameFlags::Legacy)) {
+      const bool validEnemyIntel = !line.enemyTarget
+         || (!game.isNullEntity (line.enemyTarget) && line.enemyTarget->serialnumber == line.enemySerial
+            && game.isAliveEntity (line.enemyTarget)
+            && game.getRealPlayerTeam (line.enemyTarget) != m_team && !gameState.isRoundOver ());
+      if (!validEnemyIntel) {
+         // Drop stale health intel rather than calling a dead enemy low.
+      }
+      else if (game.is (GameFlags::Legacy)) {
          sendToChatLegacy (line.text, line.teamOnly);
       }
       else {

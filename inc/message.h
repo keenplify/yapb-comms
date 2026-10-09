@@ -94,6 +94,7 @@ private:
 
 private:
    Bot *m_bot {}; // owner of a message
+   edict_t *m_recipient {}; // Damage feedback also covers human targets
    NetMsg m_current {}; // ongoing message id
 
    SmallArray <Args> m_args {}; // args collected from write* functions
@@ -158,6 +159,7 @@ private:
    void reset () {
       stopCollection ();
       m_bot = nullptr;
+      m_recipient = nullptr;
    }
 };
 

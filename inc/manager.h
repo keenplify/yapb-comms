@@ -149,6 +149,9 @@ public:
 
    void frame ();
    bool aiBridgeReady () const;
+   String enemySightingCallout (Bot *bot);
+   String enemyCalloutPlace (const Vector &position);
+   void recordEnemyDamage (edict_t *victim, int damage);
    void logAiEvent (Bot *bot, edict_t *player, StringRef text, bool teamOnly, bool canned);
    void createKillerEntity ();
    void destroyKillerEntity ();

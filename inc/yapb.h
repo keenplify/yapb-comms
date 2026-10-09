@@ -21,6 +21,8 @@ using namespace cr;
 #include <constant.h>
 #include <chatlib.h>
 #include <combat_behavior.h>
+#include <enemy_damage.h>
+#include <idle_aim.h>
 
 // tasks definition
 struct BotTask {
@@ -118,6 +120,8 @@ struct FrameDelay {
 struct QueuedSpeech {
    String text {};
    bool teamOnly {};
+   edict_t *enemyTarget {}; // cancel damage intel if its target dies before delivery
+   int enemySerial {};
 };
 
 // shared team data for bot
@@ -264,6 +268,14 @@ private:
    float m_timeHitDoor {}; // specific time after hitting the door
    float m_lastChatTime {}; // time bot last chatted
    float m_lastTacticalChatTime {}; // rate limit for purposeful bot messages
+   IdleAimDrift m_idleAim {};
+   struct EnemyDamageReport {
+      EnemyDamageEstimate estimate {};
+      edict_t *target {};
+      int serial {};
+      Vector position {};
+   };
+   EnemyDamageReport m_enemyDamage[kGameMaxPlayers] {};
    float m_typingUntil {};
    float m_timeLogoSpray {}; // time bot last spray logo
    float m_knifeAttackTime {}; // time to rush with knife (at the beginning of the round)
@@ -838,7 +850,7 @@ public:
    void clearTasks ();
    void dropWeaponForUser (edict_t *user, bool discardC4);
    void sendToChat (StringRef message, bool teamOnly);
-   void sendTeamCallout (StringRef message);
+   bool sendTeamCallout (StringRef message, bool direct = false, bool urgent = false);
    void sendAddressedReply (StringRef message, bool teamOnly, bool fromAi = false, bool direct = false);
    bool requestJump ();
    bool declineOptionalOrder ();

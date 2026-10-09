@@ -949,8 +949,95 @@ void BotManager::maintainWeaponSaves () {
    }
 }
 
+String BotManager::enemyCalloutPlace (const Vector &enemyPosition) {
+   loadMapCallouts ();
+   String place {};
+   float nearestDistance = cr::sqrf (750.0f);
+   for (const auto &callout : m_callouts) {
+      if (cr::abs (enemyPosition.z - callout.position.z) > 256.0f) continue;
+      const float distance = enemyPosition.distanceSq2d (callout.position);
+      if (distance < nearestDistance) {
+         nearestDistance = distance;
+         place = callout.name;
+      }
+   }
+   // A map without a nearby named callout cannot supply an honest location.
+   if (place.empty ()) return {};
+   if (place == "BombsiteA") place = "A";
+   else if (place == "BombsiteB") place = "B";
+   else if (place == "Middle") place = "mid";
+   else if (place == "DoubleDoors") place = "doors";
+   else if (place == "CTSpawn") place = "CT";
+   else if (place == "TSpawn") place = "T";
+   else if (place == "Tunnel") place = "tunnel";
+   return place;
+}
+
+String BotManager::enemySightingCallout (Bot *bot) {
+   // Use the enemy's currently visible position, never the speaker's location
+   // or a remembered enemy behind a wall.
+   if (!(bot->m_states & Sense::SeeingEnemy) || game.isNullEntity (bot->m_enemy)
+      || !game.isAliveEntity (bot->m_enemy)
+      || game.getRealPlayerTeam (bot->m_enemy) == bot->m_team
+      || !bot->isInViewCone (bot->m_enemy->v.origin)
+      || !bot->seesEntity (bot->m_enemy->v.origin)) return {};
+   const Vector enemyPosition = bot->m_enemy->v.origin;
+   const auto place = enemyCalloutPlace (enemyPosition);
+   if (place.empty ()) return {};
+
+   int count = 0;
+   for (const auto &client : util.getClients ()) {
+      if (!(client.flags & ClientFlags::Used) || client.ent == nullptr
+         || client.team2 == bot->m_team || !game.isAliveEntity (client.ent)
+         || client.ent->v.origin.distanceSq2d (enemyPosition) > cr::sqrf (650.0f)) continue;
+      if (bot->isInViewCone (client.ent->v.origin)
+         && bot->seesEntity (client.ent->v.origin)) ++count;
+   }
+   if (count == 0) return {};
+   return strings.format ("%d %s", count, place.chars ());
+}
+
+void BotManager::recordEnemyDamage (edict_t *victim, int damage) {
+   if (damage <= 0 || game.is (GameFlags::FreeForAll) || !game.isPlayerEntity (victim)) return;
+   const auto attacker = victim->v.dmg_inflictor;
+   if (!game.isPlayerEntity (attacker)) return; // no grenade/world attribution
+   auto bot = bots[attacker];
+   if (!bot || bot->m_isCreature || bot->m_commsStyle == CommsStyle::RadioOnly
+      || game.getRealPlayerTeam (victim) == bot->m_team
+      || !bot->isInViewCone (victim->v.origin) || !bot->seesEntity (victim->v.origin)) return;
+   const int slot = game.indexOfPlayer (victim);
+   if (slot < 0 || slot >= kGameMaxPlayers) return;
+   auto &report = bot->m_enemyDamage[slot];
+   if (report.target != victim || report.serial != victim->serialnumber) report = {};
+   report.target = victim;
+   report.serial = victim->serialnumber;
+   report.position = victim->v.origin;
+   report.estimate.hit (damage, game.time ());
+}
+
 void BotManager::maintainEnemyCallouts () {
    if (game.is (GameFlags::FreeForAll) || gameState.isRoundOver ()) return;
+
+   for (const auto &bot : bots) {
+      for (auto &report : bot->m_enemyDamage) {
+         if (!report.target) continue;
+         if (game.isNullEntity (report.target) || report.target->serialnumber != report.serial
+            || !game.isAliveEntity (report.target)
+            || game.getRealPlayerTeam (report.target) == bot->m_team) {
+            report = {}; // a kill must never produce a low-health callout
+            continue;
+         }
+         if (!report.estimate.ready (game.time ())) continue;
+         const auto place = enemyCalloutPlace (report.position); // last observed hit location
+         if (place.empty ()) continue;
+         if (bot->sendTeamCallout (strings.format ("1 %s, %s", place.chars (), report.estimate.label ()), true, true)) {
+            auto &line = bot->m_speechQueue.last ();
+            line.enemyTarget = report.target;
+            line.enemySerial = report.serial;
+            report.estimate.reportedTier = report.estimate.tier ();
+         }
+      }
+   }
 
    constexpr const char *places[3] = { "BombsiteA", "BombsiteB", "Middle" };
    constexpr const char *labels[3] = { "A", "B", "mid" };
@@ -2270,6 +2357,10 @@ void BotManager::disconnectBot (Bot *bot) {
 }
 
 void BotManager::handleDeath (edict_t *killer, edict_t *victim, StringRef weapon) {
+   const int damageSlot = game.indexOfPlayer (victim);
+   if (damageSlot >= 0 && damageSlot < kGameMaxPlayers) {
+      for (const auto &bot : bots) bot->m_enemyDamage[damageSlot] = {};
+   }
    const auto killerTeam = game.getRealPlayerTeam (killer);
    const auto victimTeam = game.getRealPlayerTeam (victim);
 
@@ -2467,6 +2558,8 @@ void Bot::newRound () {
 
    // delete all allocated path nodes
    clearSearchNodes ();
+   for (auto &report : m_enemyDamage) report = {};
+   m_idleAim = {};
    m_pendingDeathLineTime = 0.0f;
    m_recentFriendlyFlashAt = 0.0f;
    m_flashFeedbackDue = 0.0f;

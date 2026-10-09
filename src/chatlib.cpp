@@ -445,24 +445,25 @@ void Bot::sendToChat (StringRef message, bool teamOnly) {
    }
 }
 
-void Bot::sendTeamCallout (StringRef message) {
+bool Bot::sendTeamCallout (StringRef message, bool direct, bool urgent) {
    if (m_commsStyle == CommsStyle::RadioOnly || m_isCreature || message.empty ()
       || game.is (GameFlags::FreeForAll) || !bots.hasHumanOnTeam (m_team)
       || (m_team != Team::Terrorist && m_team != Team::CT)
-      || (m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())
-      || m_speechQueue.length () >= 4) return;
+      || (!urgent && m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())
+      || m_speechQueue.length () >= 4) return false;
    static TacticalCommsGate teamGates[2];
    auto &gate = teamGates[m_team == Team::CT ? 1 : 0];
    String text { message };
    const int event = tacticalPhraseIndex (text.chars ());
-   if (!gate.available (game.time (), event)) return;
+   if (!gate.available (game.time (), event)) return false;
    if (event >= 0) {
       const int variant = (gate.previousVariant[event] + rg (1, 2)) % 3;
       gate.previousVariant[event] = variant;
       text = tacticalPhrases[event].variants[variant];
    }
    gate.record (game.time (), event);
-   sendAddressedReply (text, true);
+   sendAddressedReply (text, true, false, direct);
+   return true;
 }
 
 void Bot::sendAddressedReply (StringRef message, bool teamOnly, bool fromAi, bool direct) {
