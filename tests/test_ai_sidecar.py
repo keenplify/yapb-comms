@@ -30,6 +30,37 @@ class AiSidecarTests(unittest.TestCase):
         self.assertEqual(self.event["visible_slots"], [4, 5])
         self.assertTrue(self.event["bomb_planted"])
 
+    def test_bot_tag_policy_is_parsed_without_breaking_older_logs(self):
+        self.assertFalse(self.event["bot_tags_on"])
+        line = ("[YaPB ai] chat bot=2 player=0 channel=all mode=teams bot_tags=1 "
+                "team=1 map=de_dust2 place=mid weapon=ak47 hp=100 money=1000 "
+                "friends=4 enemies=5 bomb=0 round=60 visible=0 "
+                "slots=-1,-1,-1 text=are you a bot?")
+        tagged = sidecar.parse_event(line)
+        self.assertTrue(tagged["bot_tags_on"])
+        self.assertFalse(sidecar.parse_event(line.replace("bot_tags=1", "bot_tags=0"))["bot_tags_on"])
+        self.assertIsNone(sidecar.parse_event(line.replace("bot_tags=1", "bot_tags=2")))
+
+    def test_tagged_identity_questions_are_answered_honestly_without_a_provider(self):
+        for text, reply in [("are you a bot?", "yes, i'm a bot"),
+                            ("r u a bot", "yes, i'm a bot"),
+                            ("any humans here?", "yes, i'm a bot"),
+                            ("ikaw bot ba", "oo, bot ako")]:
+            with self.subTest(text=text), patch.object(sidecar.request, "urlopen") as provider:
+                choice = sidecar.ask_provider(dict(self.event, text=text, bot_tags_on=True),
+                                              "key", "https://example.test", "model", 1)
+                self.assertEqual(choice, {"reply": reply, "action": "none"})
+                provider.assert_not_called()
+        self.assertIsNone(sidecar.disclosed_identity_reply(dict(self.event, text="bots follow me", bot_tags_on=True)))
+        self.assertIsNone(sidecar.disclosed_identity_reply(dict(self.event, text="are you a bot?", bot_tags_on=False)))
+
+    def test_tagged_prompt_cannot_override_disclosure_with_a_fake_mic_excuse(self):
+        prompt = sidecar.identity_system_prompt(dict(self.event, bot_tags_on=True))
+        self.assertIn("clearly say you are a bot", prompt)
+        self.assertNotIn("Never reveal", prompt)
+        self.assertNotIn("give a brief plausible excuse", prompt)
+        self.assertIn("Never reveal", sidecar.identity_system_prompt(self.event))
+
     def test_ffa_chat_is_public_and_cannot_order_a_bot(self):
         event = sidecar.parse_event(
             "2026-09-28 (INFO): [YaPB ai] chat bot=2 player=0 channel=all "
@@ -265,12 +296,15 @@ class AiSidecarTests(unittest.TestCase):
             return Response()
 
         with patch.object(sidecar.request, "urlopen", fake_urlopen):
-            answer = sidecar.ask_provider(self.event, "key", "https://example.test/v1/chat/completions", "model", 6)
+            answer = sidecar.ask_provider(dict(self.event, bot_tags_on=True), "key", "https://example.test/v1/chat/completions", "model", 6)
         self.assertEqual(answer, {"reply": "one b", "action": "none"})
         state = json.loads(payloads[0]["messages"][1]["content"])["bot_state"]
         self.assertEqual(payloads[0]["max_tokens"], 128)
         self.assertEqual(state["weapon"], "weapon_ak47")
         self.assertEqual(state["visible_slots"], [4, 5])
+        self.assertTrue(json.loads(payloads[0]["messages"][1]["content"])["bot_tags_on"])
+        self.assertIn("clearly say you are a bot", payloads[0]["messages"][0]["content"])
+        self.assertNotIn("Never reveal", payloads[0]["messages"][0]["content"])
 
     def test_plain_and_fenced_provider_replies(self):
         self.assertEqual(sidecar.parse_model_content("im from cali u"),

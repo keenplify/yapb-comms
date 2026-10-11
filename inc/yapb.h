@@ -23,6 +23,7 @@ using namespace cr;
 #include <combat_behavior.h>
 #include <enemy_damage.h>
 #include <idle_aim.h>
+#include <view_timing.h>
 
 // tasks definition
 struct BotTask {
@@ -302,7 +303,7 @@ private:
    float m_lastCollTime {}; // time until next collision check
    float m_lookYawVel {}; // look yaw velocity
    float m_lookPitchVel {}; // look pitch velocity
-   float m_lookUpdateTime {}; // lookangles update time
+   BotViewTiming m_viewTiming {}; // separate navigation view and combat think clocks
    float m_aimErrorTime {}; // time to update error vector
    float m_nextCampDirTime {}; // time next camp direction change
    float m_lastFightStyleCheck {}; // time checked style
@@ -521,7 +522,8 @@ private:
    void checkBurstMode (float distance);
    void checkSilencer ();
    void setAimDirection ();
-   void updateLookAngles ();
+   bool usesNavigationAim () const;
+   void updateLookAngles (bool navigationOnly = false);
    void updateBodyAngles ();
    void updateLookAnglesNewbie (const Vector &direction, float delta);
    void setIdealReactionTimers (bool actual = false);

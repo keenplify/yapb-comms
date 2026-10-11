@@ -7,6 +7,8 @@
 
 #include <yapb.h>
 #include <bhop.h>
+#include <radio_comms.h>
+#include <movement_view.h>
 
 ConVar cv_debug ("debug", "0", "Enables or disables useful messages about bot states. Not required for end users.", true, 0.0f, 4.0f);
 ConVar cv_debug_goal ("debug_goal", "-1", "Forces all alive bots to build a path and go to the graph node specified here.", true, -1.0f, kMaxNodes);
@@ -1017,10 +1019,11 @@ void Bot::pushRadioMessage (int message) {
       nextSectorClear = game.time () + 30.0f;
    }
    const bool chatReady = m_lastTacticalChatTime <= 0.0f || m_lastTacticalChatTime + 10.0f <= game.time ();
-   if (m_commsStyle == CommsStyle::ChatOnly && !chatReady) return;
-   const bool useChat = ((m_commsStyle == CommsStyle::ChatOnly && chatReady)
-      || (m_commsStyle == CommsStyle::Both && (++m_commsSequence % 2 == 0) && chatReady));
-   if (useChat) {
+   const bool takingFire = message == Radio::TakingFireNeedAssistance;
+   const auto route = tacticalRadioRoute (takingFire, m_commsStyle == CommsStyle::ChatOnly,
+      m_commsStyle == CommsStyle::Both, chatReady, m_commsSequence);
+   if (route == TacticalRadioRoute::Suppress) return;
+   if (route == TacticalRadioRoute::Chat) {
       const char *line = nullptr;
       switch (message) {
       case Radio::EnemySpotted: {
@@ -1034,7 +1037,6 @@ void Bot::pushRadioMessage (int message) {
       case Radio::HoldThisPosition: line = "Hold this position."; break;
       case Radio::RegroupTeam: line = "Regroup."; break;
       case Radio::FollowMe: line = "Follow me."; break;
-      case Radio::TakingFireNeedAssistance: line = "Taking fire. Need help."; break;
       case Radio::GoGoGo: line = "Go now."; break;
       case Radio::TeamFallback: line = "Fall back."; break;
       case Radio::StickTogetherTeam: line = "Stay together."; break;
@@ -1056,7 +1058,7 @@ void Bot::pushRadioMessage (int message) {
       }
       return;
    }
-   m_forceRadio = message == Radio::EnemySpotted
+   m_forceRadio = takingFire || message == Radio::EnemySpotted
       || !game.is (GameFlags::HasBotVoice)
       || !conf.hasChatterBank (message)
       || cv_radio_mode.as <int> () != 2; // use radio instead voice
@@ -3126,6 +3128,13 @@ void Bot::frame () {
 
       update ();
    }
+   else if (m_isAlive && !m_isCreature && !m_notStarted && !m_isStale
+      && m_botMovement && pev->maxspeed >= 10.0f && !cv_freeze_bots
+      && usesNavigationAim ()) {
+      // Keep route turns continuous at the server frame rate without running
+      // sensing, firing, navigation decisions, or movement more frequently.
+      updateLookAngles (true);
+   }
 
    if (m_slowFrameTimestamp > game.time ()) {
       return;
@@ -4303,9 +4312,19 @@ void Bot::runMovement () {
    tryBhop ();
    tryGroundStrafe ();
 
-   engfuncs.pfnRunPlayerMove (ent (),
-      getRpmAngles (), m_moveSpeed, m_strafeSpeed,
-      0.0f, static_cast <uint16_t> (pev->button), static_cast <uint8_t> (pev->impulse), msecVal);
+   const bool navigationView = m_isAlive && !m_isCreature && usesNavigationAim ();
+   runMovementPreservingView (navigationView, pev->v_angle, [this, msecVal] {
+      engfuncs.pfnRunPlayerMove (ent (),
+         getRpmAngles (), m_moveSpeed, m_strafeSpeed,
+         0.0f, static_cast <uint16_t> (pev->button), static_cast <uint8_t> (pev->impulse), msecVal);
+   });
+
+   if (navigationView) {
+      // GoldSrc replaces v_angle with the command's movement heading. Keep
+      // those movement inputs, then restore the independently smoothed view
+      // for the next turn step, spectator POV, and third-person model pose.
+      updateBodyAngles ();
+   }
 
    // save our own copy of old buttons, since bot bot code is not running every frame now
    m_oldButtons = pev->button;

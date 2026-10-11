@@ -122,9 +122,15 @@ void Bot::updateBodyAngles () {
    frustum.calculate (m_viewFrustum, pev->v_angle, getEyesPos ());
 }
 
-void Bot::updateLookAngles () {
-   const float delta = cr::clamp (game.time () - m_lookUpdateTime, cr::kFloatEqualEpsilon, kViewFrameUpdate);
-   m_lookUpdateTime = game.time ();
+bool Bot::usesNavigationAim () const {
+   return !m_wantsToFire
+      && !(m_aimFlags & (AimFlags::Enemy | AimFlags::Grenade | AimFlags::Entity
+         | AimFlags::Override | AimFlags::LastEnemy | AimFlags::PredictPath));
+}
+
+void Bot::updateLookAngles (bool navigationOnly) {
+   // Extra server-frame updates must never enter the combat aim controller.
+   if (navigationOnly && !usesNavigationAim ()) return;
 
    // A fast view update must not keep following a target cached before occlusion.
    if ((m_aimFlags & AimFlags::Enemy) && !game.isNullEntity (m_enemy)
@@ -138,6 +144,9 @@ void Bot::updateLookAngles () {
       m_bodyChoiceEnemy = nullptr;
       m_wantsToFire = false;
    }
+   const bool navigationAim = usesNavigationAim ();
+   const float delta = m_viewTiming.advance (game.time (), navigationAim, !navigationOnly,
+      kViewFrameUpdate, cr::kFloatEqualEpsilon);
    // adjust all body and view angles to face an absolute vector
    Vector direction = (m_lookAt - getEyesPos ()).angles ();
    direction.x = -direction.x; // invert for engine
@@ -165,10 +174,6 @@ void Bot::updateLookAngles () {
    }
 
    direction.clampAngles ();
-
-   const bool navigationAim = !m_wantsToFire
-      && !(m_aimFlags & (AimFlags::Enemy | AimFlags::Grenade | AimFlags::Entity
-         | AimFlags::Override | AimFlags::LastEnemy | AimFlags::PredictPath));
 
    // lower skilled bot's have lower aiming
    if (m_difficulty == Difficulty::Noob && !navigationAim) {

@@ -46,10 +46,27 @@ inline bool asksAboutBots (const char *raw) {
    };
    const bool aboutRoster = has ("everyone") || has ("everybody") || has ("all")
       || has ("anyone") || has ("anybody") || has ("any") || has ("you")
-      || has ("we") || has ("humans");
-   const bool aboutBots = has ("bot") || has ("bots") || has ("human") || has ("humans");
-   const bool questionForm = question || has ("is") || has ("are") || has ("any");
-   return aboutRoster && aboutBots && questionForm;
+      || has ("we") || has ("humans") || has ("u") || has ("ikaw") || has ("ka") || has ("kayo");
+   const bool aboutBots = has ("bot") || has ("bots") || has ("human") || has ("humans") || has ("ai");
+   const bool questionForm = question || has ("is") || has ("are") || has ("any") || has ("ba") || has ("r");
+   return (aboutRoster || question) && aboutBots && questionForm;
+}
+
+inline const char *disclosedBotReply (const char *raw) {
+   char words[97] {};
+   bool question = false;
+   if (normalizeTeamPhrase (raw, words, question)) {
+      for (const char *word = words; *word;) {
+         const char *end = std::strchr (word, ' ');
+         const size_t length = end ? static_cast <size_t> (end - word) : std::strlen (word);
+         if ((length == 4 && std::strncmp (word, "ikaw", 4) == 0)
+            || (length == 2 && (std::strncmp (word, "ka", 2) == 0 || std::strncmp (word, "ba", 2) == 0)))
+            return "oo, bot ako";
+         if (!end) break;
+         word = end + 1;
+      }
+   }
+   return "yes, i'm a bot";
 }
 
 inline bool asksForResponse (const char *raw) {

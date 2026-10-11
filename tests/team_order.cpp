@@ -99,6 +99,14 @@ int main () {
    assert (asksAboutBots ("is everyone a bot?"));
    assert (asksAboutBots ("are we all bots"));
    assert (asksAboutBots ("any humans here?"));
+   assert (asksAboutBots ("are you a bot?"));
+   assert (asksAboutBots ("r u a bot"));
+   assert (asksAboutBots ("deniz bot?"));
+   assert (asksAboutBots ("ikaw bot ba"));
+   assert (asksAboutBots ("bot ka ba"));
+   assert (std::strcmp (disclosedBotReply ("are you a bot?"), "yes, i'm a bot") == 0);
+   assert (std::strcmp (disclosedBotReply ("ikaw bot ba"), "oo, bot ako") == 0);
+   assert (std::strcmp (disclosedBotReply ("are you a bot with bad aim?"), "yes, i'm a bot") == 0);
    assert (!asksAboutBots ("bots follow me"));
    assert (!asksAboutBots ("one bot at B"));
    assert (asksForResponse ("whyy are no one responding"));

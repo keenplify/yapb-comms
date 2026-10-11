@@ -10,7 +10,6 @@ inline constexpr TacticalPhrase tacticalPhrases[] = {
    { "Contact. Enemy spotted.", { "contact, enemy ahead", "enemy spotted", "got contact here" } },
    { "Lost contact. Watching last position.", { "lost sight, watching the corner", "lost contact", "they moved out of sight" } },
    { "Reloading. Cover me.", { "reloading, cover me", "need a second to reload", "cover, changing mag" } },
-   { "Taking fire. Need help.", { "taking fire, need help", "under fire here", "need a hand, taking fire" } },
    { "Coming to help.", { "coming to help", "moving up to support", "on my way to you" } },
    { "Cover me.", { "cover me", "watch my angle", "keep me covered" } },
    { "Need backup.", { "need backup", "could use some help here", "need another gun here" } },

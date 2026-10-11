@@ -11,6 +11,17 @@ chat is off (`yb_chat 0`); prerecorded chatter is reduced to standard radio
 
 ## Communication styles and channels
 
+Navigation camera turns advance on server frames between the usual bot AI
+thinks. GoldSrc's movement command still uses the original route heading,
+speeds, buttons and duration; afterward the independently smoothed navigation
+view and model pose are restored. This prevents route commands from replacing
+the camera heading each think. Combat and precise-action aim retain their
+existing think cadence and controller. Turn updates continue to use the
+shortest signed angle and stop at their aim point. This is a server-side
+CS 1.6 change, not a client interpolation or network setting. Verify it in-game
+at route corners and when entering/leaving combat; build/tests alone cannot
+confirm the spectator camera's visual smoothness.
+
 At most two bots per team initiate text chat: one chat-first speaker and one
 alternating radio/chat speaker. Other bots use radio for routine callouts but
 can still answer when addressed by name. Enemy-spotted reports always use the
@@ -20,7 +31,11 @@ always sent with `say_team`; radio is team-only too. With a human teammate, an
 assigned quiet captain uses the closest standard radio call for buy and route
 plans. The alternating style uses
 one channel for each message,
-never both for the same callout. Random bot chat remains disabled.
+never both for the same callout. Taking-fire distress bypasses chat for every
+personality and uses the native `Taking fire, need assistance` radio call,
+including while tactical chat is on cooldown. It is not paraphrased by the
+sidecar. Existing radio enablement and team cooldowns still apply.
+Random bot chat remains disabled.
 Bot text chat is lowercase, including acknowledgements and round messages.
 
 Chat-capable bots answer a human who addresses a bot by name, says `bot` or
@@ -31,10 +46,16 @@ Short followups stay with that bot; ambiguous names get no substitute reply.
 Replies have a per-player cooldown so one conversation does not block another.
 Radio-only bots do not initiate text. All-chat messages cannot issue tactical orders.
 Human team-chat orders that are recognized take priority over social replies.
-For example, `is everyone a bot?` gets a short, deliberately ambiguous answer
-from one chat-capable bot, such as `Maybe.` or `You tell me.`. The answer uses
-the same chat channel. This common question is handled locally with keywords,
-so it does not incur model latency or cost.
+When the backend region setting `IS_BOT_TAG_ON=true` enables the server's
+`competitive_scoreboard_bot_tags`, identity questions such as `are you a bot?`
+get a direct `yes, i'm a bot` reply (`oo, bot ako` in Tagalog), in the original
+chat channel. Custom games also always disclose their bots. Recognized identity
+questions are answered locally, even without a sidecar/provider. When tagging
+is off, the existing ambiguous local replies remain. The log bridge includes
+`bot_tags=0|1`; the sidecar accepts older logs and uses the server flag to select
+an honest identity prompt for other languages and follow-up questions. The
+enabled prompt never instructs the bot to conceal its identity or invent a
+microphone excuse.
 When a human teammate hits a bot, chat-capable bots say `Watch your fire.` in
 team chat. The old team-attack text bank could name an unrelated teammate when
 its `%t` lookup missed the attacker; it is no longer used for this reaction.

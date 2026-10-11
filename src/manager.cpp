@@ -70,10 +70,12 @@ void BotManager::logAiEvent (Bot *bot, edict_t *player, StringRef text, bool tea
    char timestamp[20] {};
    const auto local = std::localtime (&now);
    if (local) std::strftime (timestamp, sizeof (timestamp), "%Y-%m-%d %H:%M:%S", local);
-   std::fprintf (stream, "%s (INFO): [YaPB ai] %s bot=%d player=%d channel=%s mode=%s team=%d map=%s place=%s weapon=%s hp=%d money=%d friends=%d enemies=%d bomb=%d round=%.0f visible=%d slots=%d,%d,%d text=%s\n",
+   std::fprintf (stream, "%s (INFO): [YaPB ai] %s bot=%d player=%d channel=%s mode=%s bot_tags=%d team=%d map=%s place=%s weapon=%s hp=%d money=%d friends=%d enemies=%d bomb=%d round=%.0f visible=%d slots=%d,%d,%d text=%s\n",
       timestamp,
       canned ? "event" : "chat", bot->m_index, player ? game.indexOfPlayer (player) : -1,
       teamOnly ? "team" : "all", game.is (GameFlags::FreeForAll) ? "ffa" : "teams",
+      engfuncs.pfnCVarGetFloat ("competitive_scoreboard_bot_tags") > 0.0f
+         || engfuncs.pfnCVarGetFloat ("competitive_custom_game") > 0.0f,
       bot->m_team, game.getMapName (), place.chars (), weapon.chars (),
       static_cast <int> (bot->pev->health), bot->m_moneyAmount,
       bot->m_numFriendsLeft, bot->m_numEnemiesLeft, gameState.isBombPlanted (),
@@ -2670,7 +2672,7 @@ void Bot::newRound () {
    m_prevSpeed = 0.0f;
    m_prevOrigin = Vector (kInfiniteDistance, kInfiniteDistance, kInfiniteDistance);
    m_prevTime = game.time ();
-   m_lookUpdateTime = game.time ();
+   m_viewTiming = { game.time (), game.time () };
    m_changeViewTime = game.time () + (rg.chance (25) ? mp_freezetime.as <float> () : 0.0f);
    m_aimErrorTime = game.time ();
 
@@ -3729,7 +3731,13 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
                }
             }
             if (recipient) {
-               if (cv_ai_bridge && aiBridgeReady ()) {
+               const bool discloseBot = engfuncs.pfnCVarGetFloat ("competitive_scoreboard_bot_tags") > 0.0f
+                  || engfuncs.pfnCVarGetFloat ("competitive_custom_game") > 0.0f;
+               if (rosterQuestion && discloseBot) {
+                  // The identity policy is deterministic and works offline.
+                  recipient->sendAddressedReply (disclosedBotReply (engfuncs.pfnCmd_Args ()), cmd == "say_team", false, true);
+               }
+               else if (cv_ai_bridge && aiBridgeReady ()) {
                   logAiEvent (recipient, ent, words, cmd == "say_team", false);
                }
                else if (rosterQuestion) {

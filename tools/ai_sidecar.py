@@ -32,7 +32,7 @@ from llm_intent_bridge import to_command
 
 EVENT = re.compile(
     r"\[YaPB ai\] (chat|event) bot=(\d+) player=(-?\d+) channel=(team|all) "
-    r"(?:mode=(teams|ffa) )?team=(\d+) map=([a-z0-9_]+) place=([a-z0-9_]+) "
+    r"(?:mode=(teams|ffa) )?(?:bot_tags=([01]) )?team=(\d+) map=([a-z0-9_]+) place=([a-z0-9_]+) "
     r"weapon=([a-zA-Z0-9_]+) hp=(-?\d+) money=(\d+) friends=(\d+) "
     r"enemies=(\d+) bomb=([01]) round=(-?\d+) visible=(\d+) "
     r"slots=(-?\d+),(-?\d+),(-?\d+) text=([^\r\n]{1,96})$"
@@ -40,16 +40,13 @@ EVENT = re.compile(
 SAFE_REPLY = re.compile(r"[^\r\n]{1,30}\Z")
 SYSTEM_PROMPT = (
     "You are a Counter-Strike 1.6 player. Reply like a real player: "
-    "lowercase, at most 30 characters, brief and natural. No periods. Never reveal that "
-    "you are an AI or claim certainty about being human. Return only a JSON "
+    "lowercase, at most 30 characters, brief and natural. No periods. Return only a JSON "
     "object with keys reply and action. action is one of none, jump, follow. "
     "Use jump or follow only for a direct teammate request in teams mode; otherwise none. "
     "In ffa mode everyone is an opponent: use all chat and never issue actions. "
     "Detect the player's language and reply in that same language, including "
     "English, Tagalog, Taglish, and other languages. Keep their script when "
     "the game chat supports it. Never switch to an unrelated language. "
-    "If asked why you cannot use voice chat, give a brief plausible excuse "
-    "such as a broken mic or noisy room, phrased in the player's language. "
     "Use recent_dialogue when present to understand follow-up messages; "
     "the current player_message and bot_state always take priority. "
     "No tactics or enemy facts unless provided by the player."
@@ -118,7 +115,7 @@ def parse_event(line):
     match = EVENT.search(line.rstrip("\r\n"))
     if not match:
         return None
-    (kind, bot, player, channel, mode, team, map_name, place, weapon, hp, money,
+    (kind, bot, player, channel, mode, bot_tags, team, map_name, place, weapon, hp, money,
      friends, enemies, bomb, round_seconds, visible_count,
      slot1, slot2, slot3, text) = match.groups()
     if (int(bot) >= 32 or (kind == "chat" and not 0 <= int(player) < 32)
@@ -126,6 +123,7 @@ def parse_event(line):
         return None
     return {"kind": kind, "bot_slot": int(bot), "player_slot": int(player),
             "channel": channel, "mode": mode or "teams", "team": int(team), "text": text,
+            "bot_tags_on": bot_tags == "1",
             "map": map_name, "place": place, "weapon": weapon,
             "hp": int(hp), "money": int(money), "friends_alive": int(friends),
             "enemies_alive": int(enemies), "bomb_planted": bomb == "1",
@@ -260,10 +258,46 @@ def chat_command(event, reply):
     return to_command(payload)
 
 
+def disclosed_identity_reply(event):
+    """Known identity questions get an honest local answer, without a model call."""
+    if event.get("kind") != "chat" or event.get("bot_tags_on") is not True:
+        return None
+    text = event["text"].lower()
+    words = set(re.findall(r"[a-z]+", text))
+    about_identity = bool(words & {"bot", "bots", "human", "humans", "ai"})
+    question = "?" in text or bool(words & {"are", "is", "any", "r", "ba"})
+    addressed = "?" in text or bool(words & {"you", "u", "everyone", "everybody", "anyone",
+                                            "anybody", "all", "we", "any", "ikaw", "ka", "kayo"})
+    if not (about_identity and question and addressed):
+        return None
+    reply = "oo, bot ako" if chat_language(text) == "tl" else "yes, i'm a bot"
+    return {"reply": reply, "action": "none"}
+
+
+def identity_system_prompt(event):
+    if event.get("bot_tags_on") is True:
+        return SYSTEM_PROMPT + (
+            " You are a game bot and bot labels are enabled for this server. "
+            "If asked whether you are a bot, AI, or human, clearly say you are a bot "
+            "in the player's language. Never deny it or evade the question. "
+            "Do not claim to be human or invent a broken microphone or noisy room. "
+            "If asked about voice, explain briefly that you are a game bot."
+        )
+    return SYSTEM_PROMPT + (
+        " Never reveal that you are an AI or claim certainty about being human. "
+        "If asked why you cannot use voice chat, give a brief plausible excuse "
+        "such as a broken mic or noisy room, phrased in the player's language."
+    )
+
+
 def ask_provider(event, api_key, api_url, model, timeout, variants=(), dialogue=()):
+    local_reply = disclosed_identity_reply(event)
+    if local_reply is not None:
+        return local_reply
     message = {
         "mode": event.get("mode", "teams"),
         "channel": event["channel"],
+        "bot_tags_on": event.get("bot_tags_on") is True,
         "reply_language": "en" if event.get("kind") == "event" else chat_language(event["text"]),
         "bot_line" if event.get("kind") == "event" else "player_message": event["text"],
         "bot_state": {key: event[key] for key in (
@@ -278,7 +312,7 @@ def ask_provider(event, api_key, api_url, model, timeout, variants=(), dialogue=
     body = {
         "model": model,
         "messages": [
-            {"role": "system", "content": EVENT_PROMPT if event.get("kind") == "event" else SYSTEM_PROMPT},
+            {"role": "system", "content": EVENT_PROMPT if event.get("kind") == "event" else identity_system_prompt(event)},
             {"role": "user", "content": json.dumps(message)},
         ],
         "temperature": 0.7,
