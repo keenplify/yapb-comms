@@ -24,6 +24,8 @@ using namespace cr;
 #include <enemy_damage.h>
 #include <idle_aim.h>
 #include <view_timing.h>
+#include <lagging_bot.h>
+#include <score_reaction.h>
 
 // tasks definition
 struct BotTask {
@@ -658,6 +660,9 @@ public:
 
    int m_pingBase {}; // base ping level for randomizing
    int m_ping {}; // bot's acutal ping
+   int m_laggingPingBase {}; // persistent simulated medium/high ping, 0 = normal
+   PingTemperament m_pingTemperament { PingTemperament::Quiet };
+   float m_nextPingComplaint {}; // survives round resets
 
    float m_spawnTime {}; // time this bot spawned
    float m_timeTeamOrder {}; // time of last radio command
@@ -854,6 +859,7 @@ public:
    void dropWeaponForUser (edict_t *user, bool discardC4);
    void sendToChat (StringRef message, bool teamOnly);
    bool sendTeamCallout (StringRef message, bool direct = false, bool urgent = false);
+   bool complainAboutPing (bool afterDeath);
    void sendAddressedReply (StringRef message, bool teamOnly, bool fromAi = false, bool direct = false);
    bool requestJump ();
    bool declineOptionalOrder ();
@@ -1020,6 +1026,10 @@ extern ConVar cv_chat;
 extern ConVar cv_ai_bridge;
 extern ConVar cv_language;
 extern ConVar cv_show_latency;
+extern ConVar cv_lagging_bot_percent;
+extern ConVar cv_medium_ping_bot_percent;
+extern ConVar cv_round_chat;
+extern ConVar cv_comms_debug;
 extern ConVar cv_show_avatars;
 extern ConVar cv_enable_query_hook;
 extern ConVar cv_chatter_path;

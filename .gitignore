@@ -2,6 +2,7 @@
 *.so
 *.user
 *.json
+!package.json
 
 vc/x64
 vc/release
@@ -12,6 +13,7 @@ vc/enc_temp_folder
 build/
 build-comms/
 build-comms-32/
+build-release-local/
 dist/
 /data/
 __pycache__/

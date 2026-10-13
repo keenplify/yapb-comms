@@ -445,6 +445,43 @@ void Bot::sendToChat (StringRef message, bool teamOnly) {
    }
 }
 
+bool Bot::complainAboutPing (bool afterDeath) {
+   static float nextComplaint = 0.0f;
+   const float now = game.time ();
+   const auto temperament = pingTemperamentForStyle (m_pingTemperament, m_personality,
+      engfuncs.pfnInfoKeyValue (engfuncs.pfnGetInfoKeyBuffer (ent ()), "_16c_chat_style"));
+   const bool teamOnly = !game.is (GameFlags::FreeForAll);
+   const bool profileEnabled = m_laggingPingBase >= 100
+      ? cv_lagging_bot_percent.as <int> () > 0 : cv_medium_ping_bot_percent.as <int> () > 0;
+   if (!cv_round_chat || !profileEnabled || !fakeping.hasFeature () || m_laggingPingBase <= 0
+      || m_isCreature || m_notStarted || m_commsStyle == CommsStyle::RadioOnly
+      || (teamOnly && !bots.hasHumanOnTeam (m_team))
+      || (m_team != Team::CT && m_team != Team::Terrorist && teamOnly)
+      || !m_speechQueue.empty () || now < nextComplaint
+      || (m_lastTacticalChatTime > 0.0f && now < m_lastTacticalChatTime + 10.0f)
+      || !shouldComplainAboutPing (temperament, m_ping, afterDeath,
+         now, m_nextPingComplaint, rg (0, 99))) return false;
+
+   constexpr const char *deathLines[] = { "%d ping i cant react", "%d ping is rough", "%d ping again bruh", "%d ping im losing it" };
+   constexpr const char *roundLines[] = { "still %d ping", "%d ping this is rough", "%d ping already bruh", "%d ping seriously" };
+   constexpr const char *mediumLines[] = { "%d ping feels off", "%d ping kinda rough" };
+   const int variant = (temperament == PingTemperament::Tilted ? 2 : 0) + rg (0, 1);
+   String line {};
+   line.assignf (m_ping < 100 ? mediumLines[variant % 2]
+      : afterDeath ? deathLines[variant] : roundLines[variant], m_ping);
+   // Keep the speech/AI path and its numeric fact checks. This is simulated
+   // latency, not measured packet loss or evidence of a server network fault.
+   if (teamOnly) {
+      if (!sendTeamCallout (line)) return false;
+   }
+   else sendAddressedReply (line, false);
+   m_nextPingComplaint = now + rg (90.0f, 150.0f);
+   nextComplaint = now + 30.0f;
+   if (cv_comms_debug) logger.message ("[YaPB comms] ping complaint bot=%d ping=%d context=%s",
+      m_index, m_ping, afterDeath ? "death" : "round");
+   return true;
+}
+
 bool Bot::sendTeamCallout (StringRef message, bool direct, bool urgent) {
    if (m_commsStyle == CommsStyle::RadioOnly || m_isCreature || message.empty ()
       || game.is (GameFlags::FreeForAll) || !bots.hasHumanOnTeam (m_team)

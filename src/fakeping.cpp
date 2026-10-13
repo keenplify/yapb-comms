@@ -7,6 +7,9 @@
 
 #include <yapb.h>
 
+ConVar cv_lagging_bot_percent ("lagging_bot_percent", "15", "Percentage of newly created bots with simulated high scoreboard ping. Zero disables high profiles and their complaints.", true, 0.0f, 100.0f);
+ConVar cv_medium_ping_bot_percent ("medium_ping_bot_percent", "25", "Percentage of newly created bots with medium scoreboard ping, after reserving high-ping slots. Zero disables medium profiles.", true, 0.0f, 100.0f);
+
 ConVar cv_ping_base_min ("ping_base_min", "5", "Lower bound for base bot ping shown in the scoreboard upon creation.", true, 0.0f, 100.0f);
 ConVar cv_ping_base_max ("ping_base_max", "20", "Upper bound for base bot ping shown in the scoreboard upon creation.", true, 0.0f, 100.0f);
 ConVar cv_ping_count_real_players ("ping_count_real_players", "1", "Count player pings when calculating the average ping for bots. If not, a random ping is chosen for bots.");
@@ -69,6 +72,12 @@ void BotFakePingManager::syncCalculate () {
    }
 
    for (auto &bot : bots) {
+      const int base = bot->m_laggingPingBase;
+      if (base > 0 && (base >= 100 ? cv_lagging_bot_percent : cv_medium_ping_bot_percent).as <int> () > 0) {
+         const int jitter = base < 100 ? 8 : 15;
+         bot->m_ping = laggingDisplayPing (base, rg (-jitter, jitter));
+         continue;
+      }
       const auto diff = static_cast <int> (static_cast <float> (averagePing) * 0.2f);
 
       // randomize bot ping
@@ -125,4 +134,3 @@ void BotFakePingManager::restartTimer () {
 int BotFakePingManager::randomBase () const {
    return rg (cv_ping_base_min.as <int> (), cv_ping_base_max.as <int> ());
 }
-

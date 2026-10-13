@@ -1157,6 +1157,10 @@ void BotManager::maintainRoundChat () {
       }
       if (!speaker) continue;
       constexpr const char *preLines[] = { "glhf", "we got this", "play smart", "let's focus" };
+      if (!roundOver && speaker->complainAboutPing (false)) {
+         sent = true;
+         continue;
+      }
       constexpr const char *winLines[] = { "nice round", "good stuff", "clean", "well played" };
       const int variation = (m_roundChatNumber + speaker->m_index) % 4;
       const char *line = !roundOver ? (m_roundChatNumber == 1 ? "glhf" : preLines[variation])
@@ -1183,9 +1187,12 @@ void BotManager::maintainKillReactions () {
             || (bot->m_lastTacticalChatTime > 0.0f
                && bot->m_lastTacticalChatTime + 10.0f > game.time ())) continue;
 
-         constexpr const char *lines[] = { "%d frags and counting", "%d on the board, keep going", "%d frags, still in it" };
-         String line {};
-         line.assignf (lines[rg (0, 2)], score);
+         constexpr const char *positive[] = { "im cooking today", "ill take that score", "doing alright so far" };
+         constexpr const char *negative[] = { "my score is rough", "need to turn this around", "im getting cooked" };
+         constexpr const char *neutral[] = { "could be doing better", "need to make these count", "gotta pick it up" };
+         const auto feeling = scoreFeeling (score, bot->m_deathCount);
+         const char *line = feeling == ScoreFeeling::Confident ? positive[rg (0, 2)]
+            : feeling == ScoreFeeling::Struggling ? negative[rg (0, 2)] : neutral[rg (0, 2)];
          bot->sendAddressedReply (line, false);
          bot->m_lastHighScoreChatMilestone = milestone;
          m_nextHighScoreChatTime = game.time () + rg (30.0f, 45.0f);
@@ -2160,6 +2167,16 @@ Bot::Bot (edict_t *bot, int difficulty, int personality, int team, int skin) {
    }
    m_pingBase = fakeping.randomBase ();
    m_ping = fakeping.randomBase ();
+   const int pingProfileRoll = rg (0, 99);
+   const int highPingPercent = cv_lagging_bot_percent.as <int> ();
+   if (pingProfileRoll < highPingPercent) {
+      m_laggingPingBase = rg (120, 220);
+      m_ping = m_laggingPingBase;
+   }
+   else if (pingProfileRoll < highPingPercent + cv_medium_ping_bot_percent.as <int> ()) {
+      m_laggingPingBase = rg (60, 90);
+      m_ping = m_laggingPingBase;
+   }
 
    m_previousThinkTime = game.time () - 0.1f;
    m_frameInterval = game.time ();
@@ -2191,6 +2208,7 @@ Bot::Bot (edict_t *bot, int difficulty, int personality, int team, int skin) {
       m_baseFearLevel = rg (0.4f, 0.7f);
       break;
    }
+   m_pingTemperament = pingTemperament (m_personality, rg (0, 99));
    clearAmmoInfo ();
 
    m_currentWeapon = 0; // current weapon is not assigned at start
@@ -2472,6 +2490,9 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim, StringRef weapon
       victimBot->spawned ();
       victimBot->m_isAlive = false;
       victimBot->m_pendingDeathLineTime = 0.0f;
+      const bool pingComplaint = game.isPlayerEntity (killer) && killer != victim
+         && (game.is (GameFlags::FreeForAll) || killerTeam != victimTeam)
+         && victimBot->complainAboutPing (true);
 
       // Opponent-facing death banter is reserved for human kills. It is
       // deliberately sparse, score-aware, and globally throttled so a bot-heavy
@@ -2484,7 +2505,7 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim, StringRef weapon
                && (victimTeam == Team::CT || victimTeam == Team::Terrorist)
                && killerTeam != victimTeam));
 
-      if (killedByHuman
+      if (killedByHuman && !pingComplaint
          && victimBot->m_commsStyle != CommsStyle::RadioOnly
          && game.time () >= m_nextHumanKillChatTime) {
          const bool knifeKill = weapon == "knife";
@@ -2510,17 +2531,22 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim, StringRef weapon
          const bool matchPointPressure = humanScore >= target - 1 && botScore < humanScore;
          const bool frustrated = botScore < humanScore
             && (matchPointPressure || deficit >= 4 || rg.chance (35));
-         const int chance = (knifeKill || nadeKill) ? 100 : frustrated ? 45 : 22;
+         const auto feeling = scoreFeeling (cr::max (0, static_cast <int> (victimBot->pev->frags)), victimBot->m_deathCount);
+         const int chance = (knifeKill || nadeKill) ? 100
+            : frustrated || feeling == ScoreFeeling::Struggling ? 45 : 22;
 
          if (rg.chance (chance)) {
-            constexpr const char *frustratedLines[] = { "come on", "bruh", "rough", "ugh" };
+            constexpr const char *frustratedLines[] = { "my score is rough", "im getting cooked", "need to turn this around", "cant catch a break" };
+            constexpr const char *positiveLines[] = { "still doing alright", "ill take that score", "not bad so far", "still feeling good" };
             constexpr const char *normalLines[] = { "wp", "close", "ok ok", "not over" };
             const char *mood = knifeKill ? "that knife was clean"
                : nadeKill ? "nice nade"
-               : frustrated ? frustratedLines[rg (0, 3)] : normalLines[rg (0, 3)];
+               : feeling == ScoreFeeling::Confident ? positiveLines[rg (0, 3)]
+               : feeling == ScoreFeeling::Struggling || frustrated ? frustratedLines[rg (0, 3)]
+               : normalLines[rg (0, 3)];
 
             String line {};
-            line.assignf ("%d-%d first to %d, %s", botScore, humanScore, target, mood);
+            line = mood;
 
             if (cv_ai_bridge && aiBridgeReady ()) {
                logAiEvent (victimBot, nullptr, line, false, true);

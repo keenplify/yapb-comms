@@ -56,7 +56,9 @@ EVENT_PROMPT = (
     "like brief real player chat. lowercase, no periods, at most 30 characters. "
     "Keep every number, location, and buy or eco decision exactly. Do not "
     "invent an enemy, position, weapon, or action. Use fresh wording when "
-    "possible. Always use English for these bot lines. In ffa mode everyone is "
+    "possible. Do not add score, kills/deaths, match format or win-target recaps. "
+    "Preserve the supplied line's positive or negative feeling about performance. "
+    "Always use English for these bot lines. In ffa mode everyone is "
     "an opponent and speech is public. Return only JSON with "
     "reply and action; action must be none."
 )

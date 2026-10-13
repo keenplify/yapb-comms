@@ -269,10 +269,11 @@ its highest count. These lines have the same chat cooldown and require a
 living chat-capable teammate.
 
 When a human opponent kills a chat-capable bot, that dead bot now has an
-occasional all-chat reaction. The reaction includes the live score and match
-target so AI rephrasing stays grounded: normal 5v5 and unrated matches use the
-MR12 first-to-13 target, while FFA uses first-to-90 and the bot/killer frag
-scores. Bots become more likely to sound frustrated when trailing badly or
+occasional all-chat reaction. Bots express a feeling about their own performance,
+such as `my score is rough`, `im getting cooked`, or `still doing alright`.
+They do not recite score numbers or the match target. Personal kills/deaths
+determine whether a reaction is positive, negative or neutral. Match standings
+still inform frustration internally. Bots sound more frustrated when trailing badly or
 facing match point. Bot-vs-bot deaths do not trigger this opponent banter, and
 a global cooldown prevents death-chat spam.
 Knife and HE grenade kills by a human use a specific reaction when that
@@ -282,8 +283,34 @@ line in place of random kill chat when their text cooldown is free.
 
 In any mode, a living chat-capable bot comments on its own frag score after
 crossing a high-score milestone (20 frags in team modes, 40 in FFA, then every
-10 frags). Each bot announces a milestone once, with a shared cooldown between
-high-score messages.
+10 frags). Each milestone triggers a qualitative reaction once, with a shared
+cooldown. A high kill count with many more deaths gets a negative reaction,
+not an automatic boast. Numeric milestone announcements are removed.
+
+## Simulated connection personalities
+
+New bots have persistent connection profiles: by default 15% have a high base
+ping of 120–220 ms, 25% have a medium base of 60–90 ms, and the rest retain
+the ordinary low-ping calculation. High profiles fluctuate by up to 15 ms;
+medium profiles by up to 8 ms. `yb_lagging_bot_percent` and
+`yb_medium_ping_bot_percent` control new-bot proportions; high slots take
+priority if the percentages total more than 100. Setting either to zero also
+disables that category on existing bots until re-enabled.
+
+This is scoreboard simulation, not real network delay or a combat penalty.
+Complaints require visible fake-ping mode (`yb_show_latency 2`), a chat-capable
+bot, `yb_round_chat 1`, and an available speech cooldown. Rushers are usually
+complainers, some normal bots occasionally grumble, and careful bots never
+complain. Some rushers and normal bots are permanently quiet about ping too.
+The managed roster's chat style overrides this fallback: quiet, sweet and dry
+characters never complain; rude characters are more prone to it, and talkative
+characters occasionally grumble. Careful bots stay quiet even with a rude style.
+High-ping bots may complain after an enemy death or during an existing pre-round
+social slot. Medium-ping bots only rarely mention it after an enemy death.
+The spoken ping is sampled from their displayed ping. Complaints are limited
+to one per bot every 90–150 seconds and one globally every 30 seconds. They
+do not replace radio distress, add routine combat chatter or report invented
+packet loss. Ping complaints replace other opponent death banter for that death.
 
 After a bomb plant, living Terrorist bots more than 700 units from the planted
 site now interrupt stale routes and head to a nearby YaPB graph node at the

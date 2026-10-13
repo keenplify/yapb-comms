@@ -179,7 +179,7 @@ endif()
 # Standalone behavior tests do not require a running GoldSrc server.
 include(CTest)
 if(BUILD_TESTING AND NOT CMAKE_SYSTEM_NAME MATCHES "Emscripten")
-    foreach(test_name combat_behavior team_order bhop radio_comms view_smoothing)
+    foreach(test_name combat_behavior team_order bhop radio_comms view_smoothing lagging_bot score_reaction)
         add_executable(${test_name}_test tests/${test_name}.cpp)
         target_include_directories(${test_name}_test PRIVATE inc)
         # The fixtures use assert; retain them in Release builds too.
