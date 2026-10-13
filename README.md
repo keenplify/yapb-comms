@@ -21,10 +21,13 @@ format. GitHub generates release notes from the committed changes.
 Local tags are separate from CI's `comms-<commit SHA>` releases to avoid collisions.
 
 Requirements: Node.js 20+, npm, Git, authenticated GitHub CLI (`gh auth login`),
-CMake, Python 3, and a C++ compiler with 32-bit development libraries. Commit
-and push your changes first, including submodule changes. The command does not
-commit or push source for you. It refuses dirty or uninitialized submodules,
-source changes during the build, and existing releases. Assets are uploaded to
+CMake, Python 3, and a C++ compiler with 32-bit development libraries. The command
+initializes missing submodules, stages and commits pending YaPB changes, and
+pushes the current branch to origin before building and publishing. Automatic
+commits use `[skip ci]` to avoid a redundant Actions build. Ignored files are
+excluded. It stops on merge conflicts, detached HEAD, changed dependency revisions,
+source changes during the build, push failures and existing releases. It never
+force-pushes or resets changes. Assets are uploaded to
 a draft before publication; a failed upload leaves the draft for inspection.
 Local artifacts are kept under `dist/local-release/`. No GitHub Actions build
 is required. Run `npm run test:release:local` to test the tooling without publishing.

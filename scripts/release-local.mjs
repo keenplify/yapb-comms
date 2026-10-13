@@ -22,7 +22,7 @@ function execute(command, args, options) {
     ...options,
     encoding: 'utf8',
     stdio: options.capture ? ['ignore', 'pipe', 'inherit'] : 'inherit'
-  })?.trim() ?? ''
+  })?.trimEnd() ?? ''
 }
 
 export async function releaseLocal(root, { run = execute, log = console.log } = {}) {
@@ -31,24 +31,51 @@ export async function releaseLocal(root, { run = execute, log = console.log } = 
   }
   const capture = (cmd, args) => run(cmd, args, { cwd: root, capture: true })
   const invoke = (cmd, args) => run(cmd, args, { cwd: root })
+  const repo = githubRepository(capture('git', ['remote', 'get-url', 'origin']))
+  const branch = capture('git', ['branch', '--show-current'])
+  if (!branch) throw new Error('Check out a branch before releasing; detached HEAD cannot be pushed automatically')
+  invoke('git', ['check-ref-format', '--branch', branch])
+  if (capture('git', ['diff', '--name-only', '--diff-filter=U'])) {
+    throw new Error('Resolve Git merge conflicts before releasing')
+  }
+  invoke('gh', ['auth', 'status', '--hostname', 'github.com'])
+  // Populate missing dependencies without resetting an intentionally changed
+  // submodule checkout. Dependency revision changes still require explicit care.
+  let submodules = capture('git', ['submodule', 'status', '--recursive'])
+  if (submodules.split('\n').some(line => /^-/.test(line))) {
+    invoke('git', ['submodule', 'update', '--init', '--recursive'])
+    submodules = capture('git', ['submodule', 'status', '--recursive'])
+  }
+  if (submodules.split('\n').some(line => /^[+U-]/.test(line))) {
+    throw new Error('Submodules must be at their pinned commits before releasing')
+  }
+  if (capture('git', ['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'])) {
+    log('Committing pending YaPB changes for the local release...')
+    invoke('git', ['add', '--all'])
+    // The local command builds the artifacts; do not trigger a redundant CI
+    // build when this automatically created preparation commit is pushed.
+    invoke('git', ['commit', '-m', 'Prepare local YaPB release [skip ci]'])
+  }
   const assertClean = () => {
     if (capture('git', ['status', '--porcelain', '--untracked-files=all', '--ignore-submodules=none'])) {
-      throw new Error('Commit or stash YaPB changes before releasing; uncommitted binaries cannot be pinned to a commit')
+      throw new Error('YaPB changes remain after the release commit or appeared during the build; rerun release:local')
     }
     const submodules = capture('git', ['submodule', 'status', '--recursive'])
-    if (submodules.split('\n').some(line => /^[+-U]/.test(line))) {
+    // Keep '-' last: [+-U] denotes an ASCII range and incorrectly matches
+    // numeric commit hashes when leading whitespace has been trimmed.
+    if (submodules.split('\n').some(line => /^[+U-]/.test(line))) {
       throw new Error('Initialize submodules at their pinned commits before releasing')
     }
   }
   assertClean()
   const commit = capture('git', ['rev-parse', 'HEAD'])
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Invalid source commit')
-  const repo = githubRepository(capture('git', ['remote', 'get-url', 'origin']))
   // CI publishes comms-<sha> on every main push; use an independent tag so its
   // upload step cannot overwrite a locally built release for the same source.
   const tag = `comms-local-${commit}`
-  invoke('gh', ['auth', 'status', '--hostname', 'github.com'])
-  // Read-only preflight: publishing must refer to source already on GitHub.
+  log(`Pushing ${branch} to origin...`)
+  invoke('git', ['push', 'origin', `HEAD:refs/heads/${branch}`])
+  // Publishing must refer to the exact source commit now available on GitHub.
   const remoteCommit = capture('gh', ['api', `repos/${repo}/commits/${commit}`, '--jq', '.sha'])
   if (remoteCommit !== commit) throw new Error('Push this source commit to GitHub before releasing')
   const assertNewRelease = () => {

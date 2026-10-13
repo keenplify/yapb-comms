@@ -34,7 +34,7 @@ test('binary gate rejects 64-bit, foreign architecture, executables and truncate
   assert.throws(() => verifyLinuxX86(Buffer.alloc(20)))
 })
 
-async function fixture(t, { dirty = false, existing = false, failTests = false, invalidBinary = false, changedCommit = false } = {}) {
+async function fixture(t, { dirty = false, existing = false, failTests = false, invalidBinary = false, changedCommit = false, detached = false, conflicts = false, failPush = false, failInit = false, dirtyDuringBuild = false, submodules = '7efccddc085dbaef20e1310f3e270f07cb2b0eff ext/crlib (heads/master-13-g7efccdd)\n a21540a52d7559333ad9d8326411daf78af62891 ext/linkage (a21540a)' } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'yapb-release-test-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   await mkdir(join(root, 'build-release-local'))
@@ -42,11 +42,21 @@ async function fixture(t, { dirty = false, existing = false, failTests = false, 
   await writeFile(join(root, 'build-release-local/libyapb.so'), binary)
   const calls = []
   let headReads = 0
+  let built = false
   const run = (cmd, args) => {
     calls.push([cmd, ...args])
-    if (cmd === 'git' && args[0] === 'status') return dirty ? ' M src/chatlib.cpp' : ''
+    if (cmd === 'git' && args[0] === 'status') return dirty || (built && dirtyDuringBuild) ? ' M src/chatlib.cpp' : ''
+    if (cmd === 'git' && args[0] === 'branch') return detached ? '' : 'main'
+    if (cmd === 'git' && args[0] === 'diff') return conflicts ? 'src/chatlib.cpp' : ''
+    if (cmd === 'git' && args[0] === 'commit') dirty = false
+    if (cmd === 'git' && args[0] === 'push' && failPush) throw new Error('push rejected')
+    if (cmd === 'cmake' && args[0] === '--build') built = true
     if (cmd === 'git' && args[0] === 'rev-parse') return changedCommit && headReads++ > 0 ? 'b'.repeat(40) : commit
     if (cmd === 'git' && args[0] === 'remote') return 'https://github.com/keenplify/yapb-comms.git'
+    if (cmd === 'git' && args[0] === 'submodule') {
+      if (args[1] === 'update' && !failInit) submodules = ' ' + commit + ' ext/crlib'
+      return args[1] === 'status' ? submodules : ''
+    }
     if (cmd === 'gh' && args[0] === 'api') return args.includes('.sha') ? commit : existing ? `comms-local-${commit}` : ''
     if (cmd === 'ctest' && failTests) throw new Error('behavior regression')
     if (cmd === 'gh' && args[0] === 'release' && args[1] === 'view') {
@@ -74,11 +84,17 @@ test('clean successful release tests before publication and publishes a verified
 })
 
 for (const [name, options, error] of [
-  ['dirty source', { dirty: true }, /Commit or stash/],
+  ['detached HEAD', { detached: true }, /detached HEAD/],
+  ['merge conflicts', { conflicts: true }, /merge conflicts/],
+  ['push failure', { failPush: true }, /push rejected/],
+  ['source dirtied during build', { dirtyDuringBuild: true }, /appeared during the build/],
   ['existing release', { existing: true }, /already has/],
   ['failed behavior tests', { failTests: true }, /behavior regression/],
   ['wrong binary', { invalidBinary: true }, /ELF 32-bit/],
-  ['source changed during build', { changedCommit: true }, /Source commit changed/]
+  ['source changed during build', { changedCommit: true }, /Source commit changed/],
+  ['uninitialized submodule', { submodules: `-${commit} ext/crlib`, failInit: true }, /pinned commits/],
+  ['unpinned submodule', { submodules: `+${commit} ext/crlib` }, /pinned commits/],
+  ['conflicted submodule', { submodules: `U${commit} ext/crlib` }, /pinned commits/]
 ]) {
   test(`${name} cannot create or edit a release`, async t => {
     const { root, calls, run } = await fixture(t, options)
@@ -86,3 +102,30 @@ for (const [name, options, error] of [
     assert.ok(calls.every(call => !(call[0] === 'gh' && call[1] === 'release')))
   })
 }
+
+
+test('one command commits pending changes and pushes the exact branch before building', async t => {
+  const { root, calls, run } = await fixture(t, { dirty: true })
+  await releaseLocal(root, { run, log() {} })
+  const stage = calls.findIndex(call => call[0] === 'git' && call[1] === 'add')
+  const commitCall = calls.findIndex(call => call[0] === 'git' && call[1] === 'commit')
+  const push = calls.findIndex(call => call[0] === 'git' && call[1] === 'push')
+  const build = calls.findIndex(call => call[0] === 'cmake')
+  assert.ok(stage >= 0 && commitCall > stage && push > commitCall && build > push)
+  assert.deepEqual(calls[stage], ['git', 'add', '--all'])
+  assert.ok(calls[commitCall].at(-1).includes('[skip ci]'))
+  assert.deepEqual(calls[push], ['git', 'push', 'origin', 'HEAD:refs/heads/main'])
+})
+
+test('a clean checkout is pushed without creating an empty preparation commit', async t => {
+  const { root, calls, run } = await fixture(t)
+  await releaseLocal(root, { run, log() {} })
+  assert.ok(calls.some(call => call[0] === 'git' && call[1] === 'push'))
+  assert.ok(calls.every(call => !(call[0] === 'git' && ['add', 'commit'].includes(call[1]))))
+})
+
+test('missing submodules are automatically initialized before building', async t => {
+  const { root, calls, run } = await fixture(t, { submodules: `-${commit} ext/crlib` })
+  await releaseLocal(root, { run, log() {} })
+  assert.ok(calls.some(call => call[0] === 'git' && call[1] === 'submodule' && call[2] === 'update'))
+})
