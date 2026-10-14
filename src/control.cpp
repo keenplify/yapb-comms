@@ -378,6 +378,9 @@ int BotControl::cmdAi () {
       return BotCommandResult::Handled;
    }
    const auto intent = arg <StringRef> (action);
+   // Reject delayed actions/speech from the preceding phase.
+   if (bots.isMatchCompleted () && intent != "post_chat") return BotCommandResult::Handled;
+   if (!bots.isMatchCompleted () && intent == "post_chat") return BotCommandResult::Handled;
    if (intent == "follow") {
       if (!hasArg (argument)) return BotCommandResult::BadFormat;
       if (!bot->m_isAlive) return BotCommandResult::Handled;
@@ -430,7 +433,7 @@ int BotControl::cmdAi () {
       bot->sendAddressedReply (lines[lineText[0] - '0'], true, true);
       msg ("AI dead chat requested for team.");
    }
-   else if (intent == "chat") {
+   else if (intent == "chat" || intent == "post_chat") {
       if (!hasArg (argument) || !hasArg (argument + 1)) return BotCommandResult::BadFormat;
       const auto channel = arg <StringRef> (argument);
       if (channel != "team" && channel != "all") return BotCommandResult::BadFormat;

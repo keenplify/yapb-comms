@@ -71,6 +71,7 @@ private:
    float m_preRoundChatTime[kGameTeamNum] {};
    float m_postRoundChatTime[kGameTeamNum] {};
    bool m_preRoundChatSent[kGameTeamNum] {};
+   bool m_matchGreetingSent[kGameTeamNum] {};
    bool m_postRoundChatSent[kGameTeamNum] {};
    bool m_flashFeedbackSent[kGameTeamNum] {};
    float m_lastHumanFlashMention[kGameTeamNum] {};
@@ -99,6 +100,10 @@ private:
    float m_humanDropDeadline[kGameTeamNum] {};
    bool m_humanDropBuyIssued[kGameTeamNum] {};
    int m_roundChatNumber {};
+   int m_competitiveBuyEpoch {};
+   bool m_postGameStarted {};
+   float m_postGameChatTime {};
+   int m_postGameLines {};
    String m_calloutMap {};
    Array <MapCallout> m_callouts {};
    Array <TeamAlias> m_teamAliases {};
@@ -148,6 +153,9 @@ public:
    float getAverageTeamKPD (bool calcForBots);
 
    void frame ();
+   bool isMatchCompleted () const;
+   int getRoundNumber () const { return m_roundChatNumber; }
+   void maintainCompetitiveLifecycle ();
    bool aiBridgeReady () const;
    String enemySightingCallout (Bot *bot);
    String enemyCalloutPlace (const Vector &position);

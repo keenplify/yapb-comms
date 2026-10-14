@@ -1,5 +1,36 @@
 # YaPB team comms test build
 
+Enemy count/location reports are team-only and visibly labeled as team chat.
+YaPB and the AMXX bridge both suppress reports while either party is firing or
+the reporting bot recently took damage. Delayed sighting radio/text is checked
+again before delivery. Map-aware labels use A/B, mid, doors and verified Dust/Dust2
+long approaches, without guessing other maps' ambiguous NAV labels.
+`glhf` is limited to the first real live round, independently of warmup/restarts.
+Later social pre/post-round chatter is optional (25%/35% per team per round) and
+uses competitive mid-game lines; objective/economy communication remains useful.
+
+Competitive lifecycle changes require the matching `16competitive_core.amxx`
+and `tools/ai_sidecar.py`. The core publishes `competitive_bot_buy_epoch` after
+halftime/OT loadouts and money settle, and latches `competitive_match_completed`
+at final result. YaPB refreshes buying on the former and stops tactics, buying,
+movement and stale AI commands on the latter; only post-game chat remains.
+
+On native CS 1.6/ReGameDLL, utility pre-throws use mapped holding spots ahead of
+the bot, or a position it personally saw before dying in the previous round.
+Learned spots expire after that next round's first 45 seconds, cannot cross a
+side switch, and are tried only once. HE and flash selection is optional and
+personality-sensitive; careful bots keep utility for observed/learned threats.
+Throws wait until after freeze time, exclude both spawn areas (550-unit radius),
+require a valid trajectory and check nearby teammates. Initial checks are
+staggered 8–14 seconds after reset; successful pre-throws have 12–18 second
+cooldowns. These timings are gates, never promises to throw on every round.
+
+Validate with the backend's disposable `src/amxx/tests/bot_buy_epoch.sma` (two
+bots buying again with $10000 after a forced side switch) and
+`src/amxx/tests/match_finished_screen.sma` (terminal freeze/fade/round gates).
+Spectate learned-spot and flash safety behavior in a full match before release;
+standalone policy tests and compilation do not prove grenade placement in-game.
+
 Idle aim now wanders slowly by up to 3 degrees horizontally and 6 vertically,
 choosing a new offset every 2–4.5 seconds. Verify bots vary their eye level with
 no enemy, then regain precise aim on contact. Combat, recent contact, grenade

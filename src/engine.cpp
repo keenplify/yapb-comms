@@ -1148,6 +1148,7 @@ void Game::applyGameModes () {
 }
 
 void Game::slowFrame () {
+   if (bots.isMatchCompleted ()) return;
    const auto nextUpdate = cr::clamp (75.0f * globals->frametime, 0.5f, 1.0f);
 
    // run something that is should run more

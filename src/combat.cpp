@@ -6,6 +6,7 @@
 //
 
 #include <yapb.h>
+#include <holding_utility.h>
 
 ConVar cv_shoots_thru_walls ("shoots_thru_walls", "0", "Specifies whether bots are able to fire at a frozen last-known position behind a wall. Hidden players are never promoted to visible targets.", true, 0.0f, 3.0f);
 ConVar cv_ignore_enemies ("ignore_enemies", "0", "Enables or disables searching the world for enemies.");
@@ -592,6 +593,10 @@ bool Bot::lookupEnemies () {
 
    if (newEnemy != nullptr && (game.isPlayerEntity (newEnemy) || (cv_attack_monsters && game.isMonsterEntity (newEnemy)))
       && seesEnemy (newEnemy)) {
+      if (game.isPlayerEntity (newEnemy) && game.getRealPlayerTeam (newEnemy) != m_team) {
+         m_lastVisibleHoldingSpot = newEnemy->v.origin;
+         m_lastVisibleHoldingTime = game.time ();
+      }
       bots.setCanPause (true);
 
       m_aimFlags |= AimFlags::Enemy;
@@ -2462,6 +2467,89 @@ edict_t *Bot::setCorrectGrenadeVelocity (StringRef model) {
    return result;
 }
 
+bool Bot::tryHoldingSpotUtility () {
+   const auto tid = getCurrentTaskId ();
+   if (!game.mapIs (MapFlags::Demolition) || game.is (GameFlags::FreeForAll | GameFlags::CSDM)
+      || gameState.isRoundOver () || gameState.getRoundStartTime () + 5.0f > game.time ()
+      || bots.isMatchCompleted () || cv_ignore_enemies || isKnifeMode ()
+      || m_nextHoldingUtilityTime > game.time () || m_grenadeCheckTime > game.time ()
+      || m_isUsingGrenade || m_isReloading || m_savingWeapon || m_hasProgressBar
+      || (m_states & Sense::SeeingEnemy) || m_seeEnemyTime + 3.0f > game.time ()
+      || (tid != Task::Normal && tid != Task::MoveToPosition && tid != Task::Camp)
+      || isInNarrowPlace () || !(pev->flags & FL_ONGROUND) || m_holdingUtilityThrows >= 3) return false;
+
+   m_nextHoldingUtilityTime = game.time () + rg (3.0f, 5.0f);
+   const bool learnedSpot = !m_learnedHoldingSpot.empty () && learnedHoldingSpotAvailable (
+      m_learnedHoldingRound, bots.getRoundNumber (), m_learnedHoldingTeam, m_team,
+      game.time () - gameState.getRoundStartTime (), m_learnedHoldingUsed);
+   if ((!learnedSpot && !m_proactiveUtility) || (!learnedSpot && !rg.chance (25))) return false;
+   const int goal = graph.exists (getTask ()->data) ? getTask ()->data : m_chosenGoalIndex;
+   if (!graph.exists (goal)) return false;
+   const auto direction = (graph[goal].origin - pev->origin).get2d ().normalize_apx ();
+   if (direction.empty ()) return false;
+
+   // Map geometry only: never search enemy entities to choose a pre-throw.
+   auto candidates = graph.getNearestInRadius (650.0f, pev->origin + direction * 650.0f, 24);
+   const int seenNode = learnedSpot ? graph.getNearest (m_learnedHoldingSpot, 256.0f) : kInvalidNodeIndex;
+   if (graph.exists (seenNode)) candidates.push (seenNode);
+   int selected = kInvalidNodeIndex;
+   float best = -1.0f;
+   for (const int node : candidates) {
+      if (!graph.exists (node) || node == m_lastHoldingUtilityNode) continue;
+      const auto &spot = graph[node];
+      const bool lastSeen = node == seenNode;
+      const auto target = lastSeen ? m_learnedHoldingSpot : spot.origin;
+      const bool holding = spot.flags & (NodeFlag::Camp | NodeFlag::Sniper | NodeFlag::Narrow | NodeFlag::Goal);
+      if ((!lastSeen && (!m_proactiveUtility || !holding)) || (spot.flags & (NodeFlag::Ladder | NodeFlag::DoubleJump))) continue;
+      const auto offset = target - pev->origin;
+      const float alignment = offset.get2d ().normalize_apx () | direction;
+      if (alignment < 0.25f) continue;
+      bool outsideSpawns = true;
+      for (const auto classname : { "info_player_start", "info_player_deathmatch" }) {
+         game.searchEntities ("classname", classname, [&] (edict_t *spawn) {
+            if (spawn->v.origin.distanceSq2d (pev->origin) < cr::sqrf (550.0f)
+               || spawn->v.origin.distanceSq2d (target) < cr::sqrf (550.0f)) {
+               outsideSpawns = false;
+               return EntitySearchResult::Break;
+            }
+            return EntitySearchResult::Continue;
+         });
+      }
+      if (!holdingUtilityAllowed (true, false, false, outsideSpawns,
+         offset.length2d (), offset.z, m_holdingUtilityThrows)) continue;
+      auto velocity = calcThrow (getEyesPos (), target);
+      if (velocity.lengthSq () < 100.0f) velocity = calcToss (getEyesPos (), target);
+      if (velocity.lengthSq () < 100.0f) continue;
+      const float score = lastSeen ? 10.0f : (spot.flags & (NodeFlag::Camp | NodeFlag::Sniper) ? 3.0f : 1.0f) + alignment;
+      if (score > best) { best = score; selected = node; }
+   }
+   if (!graph.exists (selected)) return false;
+   const auto target = selected == seenNode ? m_learnedHoldingSpot : graph[selected].origin;
+   Task task = Task::Normal;
+   // Clear a holding angle with HE/flash, or smoke it off for the approach.
+   if ((pev->weapons & cr::bit (Weapon::Flashbang)) && numFriendsNear (target, 600.0f) == 0 && rg.chance (50))
+      task = Task::ThrowFlashbang;
+   else if ((pev->weapons & cr::bit (Weapon::Explosive)) && numFriendsNear (target, 350.0f) == 0)
+      task = Task::ThrowExplosive;
+   else if ((pev->weapons & cr::bit (Weapon::Flashbang)) && numFriendsNear (target, 600.0f) == 0)
+      task = Task::ThrowFlashbang;
+   else if ((pev->weapons & cr::bit (Weapon::Smoke)) && numFriendsNear (target, 250.0f) == 0)
+      task = Task::ThrowSmoke;
+   if (task == Task::Normal) return false;
+   m_throw = target;
+   if (task == Task::ThrowSmoke) m_plantCoverSmokeTarget = target;
+   m_states &= ~(Sense::ThrowExplosive | Sense::ThrowFlashbang | Sense::ThrowSmoke);
+   m_states |= task == Task::ThrowExplosive ? Sense::ThrowExplosive
+      : task == Task::ThrowFlashbang ? Sense::ThrowFlashbang : Sense::ThrowSmoke;
+   m_lastHoldingUtilityNode = selected;
+   if (selected == seenNode) m_learnedHoldingUsed = true;
+   ++m_holdingUtilityThrows;
+   m_nextHoldingUtilityTime = game.time () + rg (12.0f, 18.0f);
+   m_grenadeCheckTime = game.time () + kGrenadeCheckTime;
+   startTask (task, TaskPri::Throw, kInvalidNodeIndex, game.time () + kGrenadeCheckTime * 3.6f, false);
+   return true;
+}
+
 void Bot::checkGrenadesThrow () {
    const auto tid = getCurrentTaskId ();
 
@@ -2515,6 +2603,8 @@ void Bot::checkGrenadesThrow () {
          if (coverPlant (client.origin)) return;
       }
    }
+
+   if (!isGrenadeMode && tryHoldingSpotUtility ()) return;
 
    // check if throwing a grenade is a good thing to do...
    const auto throwingCondition = isGrenadeMode

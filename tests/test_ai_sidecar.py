@@ -30,6 +30,19 @@ class AiSidecarTests(unittest.TestCase):
         self.assertEqual(self.event["visible_slots"], [4, 5])
         self.assertTrue(self.event["bomb_planted"])
 
+    def test_post_game_phase_blocks_actions_and_marks_chat(self):
+        self.assertEqual(self.event["phase"], "playing")
+        event = dict(self.event, phase="post_game")
+        with self.assertRaises(ValueError):
+            sidecar.validate_model_choice({"reply": "sure", "action": "follow"}, event)
+        self.assertIn(" post_chat team ", sidecar.chat_command(event, "gg"))
+        line = ("[YaPB ai] chat bot=2 player=0 channel=all mode=teams bot_tags=1 phase=post_game "
+                "team=1 map=de_dust2 place=mid weapon=ak47 hp=100 money=1000 "
+                "friends=4 enemies=5 bomb=0 round=60 visible=0 "
+                "slots=-1,-1,-1 text=gg")
+        self.assertEqual(sidecar.parse_event(line)["phase"], "post_game")
+        self.assertNotEqual(sidecar.ReplyCache.key(event), sidecar.ReplyCache.key(self.event))
+
     def test_bot_tag_policy_is_parsed_without_breaking_older_logs(self):
         self.assertFalse(self.event["bot_tags_on"])
         line = ("[YaPB ai] chat bot=2 player=0 channel=all mode=teams bot_tags=1 "

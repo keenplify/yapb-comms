@@ -6,6 +6,7 @@
 //
 
 #include <yapb.h>
+#include <map_callouts.h>
 #include <bhop.h>
 #include <radio_comms.h>
 #include <movement_view.h>
@@ -981,6 +982,11 @@ void Bot::pushRadioMessage (int message) {
    if (cv_radio_mode.as <int> () == 0 || m_numFriendsLeft == 0 || m_isCreature) {
       return;
    }
+   if (message == Radio::EnemySpotted && !sightingReportAllowed (
+      (pev->button | pev->oldbuttons) & IN_ATTACK,
+      (m_states & Sense::SeeingEnemy) && !game.isNullEntity (m_enemy)
+         && ((m_enemy->v.button | m_enemy->v.oldbuttons) & IN_ATTACK),
+      m_underPressureUntil > game.time ())) return;
    if (message == Radio::EnemySpotted && cv_ping_comms
       && engfuncs.pfnCVarGetFloat ("competitive_bot_reports") > 0.0f
       && engfuncs.pfnCVarGetFloat ("competitive_player_ping") > 0.0f
@@ -1029,7 +1035,11 @@ void Bot::pushRadioMessage (int message) {
       case Radio::EnemySpotted: {
          const auto sighting = bots.enemySightingCallout (this);
          // Keep the observed count and location intact through delivery.
-         if (!sighting.empty ()) sendTeamCallout (sighting, true);
+         if (!sighting.empty () && sendTeamCallout (sighting, true)) {
+            auto &line = m_speechQueue.last ();
+            line.enemyTarget = m_enemy;
+            line.enemySerial = m_enemy->serialnumber;
+         }
          return;
       }
       case Radio::CoverMe: line = "Cover me."; break;
@@ -1182,6 +1192,15 @@ void Bot::checkMsgQueue () {
       break;
 
    case BotMsg::Radio:
+      if (m_radioSelect == Radio::EnemySpotted && !sightingReportAllowed (
+         (pev->button | pev->oldbuttons) & IN_ATTACK,
+         (m_states & Sense::SeeingEnemy) && !game.isNullEntity (m_enemy)
+            && ((m_enemy->v.button | m_enemy->v.oldbuttons) & IN_ATTACK),
+         m_underPressureUntil > game.time ())) {
+         m_forceRadio = false;
+         m_radioSelect = kInvalidRadioSlot;
+         break;
+      }
       delayResponseTime = rg (1.0f, 3.0f);
 
       // if last bot radio command (global) happened some a little time ago, delay response
@@ -3123,6 +3142,10 @@ void Bot::checkParachute () {
 }
 
 void Bot::frame () {
+   if (bots.isMatchCompleted ()) {
+      update ();
+      return;
+   }
    if (m_thinkTimer.time < game.time ()) {
       m_thinkTimer.time = game.time () + m_thinkTimer.interval;
 
@@ -3211,7 +3234,11 @@ void Bot::update () {
       const bool validEnemyIntel = !line.enemyTarget
          || (!game.isNullEntity (line.enemyTarget) && line.enemyTarget->serialnumber == line.enemySerial
             && game.isAliveEntity (line.enemyTarget)
-            && game.getRealPlayerTeam (line.enemyTarget) != m_team && !gameState.isRoundOver ());
+            && game.getRealPlayerTeam (line.enemyTarget) != m_team && !gameState.isRoundOver ()
+            && isInViewCone (line.enemyTarget->v.origin) && seesEntity (line.enemyTarget->v.origin)
+            && sightingReportAllowed ((pev->button | pev->oldbuttons) & IN_ATTACK,
+               (line.enemyTarget->v.button | line.enemyTarget->v.oldbuttons) & IN_ATTACK,
+               m_underPressureUntil > game.time ()));
       if (!validEnemyIntel) {
          // Drop stale health intel rather than calling a dead enemy low.
       }
@@ -3248,6 +3275,11 @@ void Bot::update () {
       }
    }
 
+   if (bots.isMatchCompleted ()) {
+      pev->button = pev->oldbuttons = 0;
+      m_moveSpeed = m_strafeSpeed = 0.0f;
+      return;
+   }
    m_canSetAimDirection = true;
    m_isAlive = game.isAliveEntity (ent ());
    if (!m_isAlive && m_pendingDeathLineTime > 0.0f && m_pendingDeathLineTime <= game.time ()) {

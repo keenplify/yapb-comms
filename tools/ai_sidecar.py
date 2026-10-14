@@ -32,7 +32,7 @@ from llm_intent_bridge import to_command
 
 EVENT = re.compile(
     r"\[YaPB ai\] (chat|event) bot=(\d+) player=(-?\d+) channel=(team|all) "
-    r"(?:mode=(teams|ffa) )?(?:bot_tags=([01]) )?team=(\d+) map=([a-z0-9_]+) place=([a-z0-9_]+) "
+    r"(?:mode=(teams|ffa) )?(?:bot_tags=([01]) )?(?:phase=(playing|post_game) )?team=(\d+) map=([a-z0-9_]+) place=([a-z0-9_]+) "
     r"weapon=([a-zA-Z0-9_]+) hp=(-?\d+) money=(\d+) friends=(\d+) "
     r"enemies=(\d+) bomb=([01]) round=(-?\d+) visible=(\d+) "
     r"slots=(-?\d+),(-?\d+),(-?\d+) text=([^\r\n]{1,96})$"
@@ -50,6 +50,12 @@ SYSTEM_PROMPT = (
     "Use recent_dialogue when present to understand follow-up messages; "
     "the current player_message and bot_state always take priority. "
     "No tactics or enemy facts unless provided by the player."
+    " Use the supplied map and place for modern callouts: BombsiteA is a, "
+    "BombsiteB is b, DoubleDoors is doors. On de_dust/de_dust2 Side is long; "
+    "on de_dust2 SideDoor is long doors. Never invent a location on other maps. "
+    "Say glhf only at match start or in reply to a greeting, never as recurring round chatter."
+    " When phase is post_game the match is finished: respond as post-game chat, "
+    "never call buys, round plans, enemy reports, jump or follow; action must be none."
 )
 EVENT_PROMPT = (
     "You are a Counter-Strike 1.6 player. Rephrase the supplied bot line "
@@ -61,6 +67,7 @@ EVENT_PROMPT = (
     "Always use English for these bot lines. In ffa mode everyone is "
     "an opponent and speech is public. Return only JSON with "
     "reply and action; action must be none."
+    " Keep modern callouts short (a, b, mid, doors, long); never expand them to NAV names."
 )
 CONFIG_KEYS = (
     "YAPB_AI_API_KEY", "DEEPSEEK_API_KEY",
@@ -117,7 +124,7 @@ def parse_event(line):
     match = EVENT.search(line.rstrip("\r\n"))
     if not match:
         return None
-    (kind, bot, player, channel, mode, bot_tags, team, map_name, place, weapon, hp, money,
+    (kind, bot, player, channel, mode, bot_tags, phase, team, map_name, place, weapon, hp, money,
      friends, enemies, bomb, round_seconds, visible_count,
      slot1, slot2, slot3, text) = match.groups()
     if (int(bot) >= 32 or (kind == "chat" and not 0 <= int(player) < 32)
@@ -126,6 +133,7 @@ def parse_event(line):
     return {"kind": kind, "bot_slot": int(bot), "player_slot": int(player),
             "channel": channel, "mode": mode or "teams", "team": int(team), "text": text,
             "bot_tags_on": bot_tags == "1",
+            "phase": phase or "playing",
             "map": map_name, "place": place, "weapon": weapon,
             "hp": int(hp), "money": int(money), "friends_alive": int(friends),
             "enemies_alive": int(enemies), "bomb_planted": bomb == "1",
@@ -240,6 +248,8 @@ def validate_model_choice(choice, event):
         if any(words.count(word) > required.count(word) for word in set(words)
                if word.isdigit() or word in ("mid", "eco", "buy")):
             raise ValueError("model invented a tactical fact")
+    if action != "none" and event.get("phase") == "post_game":
+        raise ValueError("finished matches cannot request bot actions")
     if action != "none" and (event["channel"] != "team" or event.get("mode") == "ffa"):
         raise ValueError("all-chat and ffa cannot request bot actions")
     commands = []
@@ -257,7 +267,10 @@ def chat_command(event, reply):
                "channel": event["channel"], "text": reply}
     if event["kind"] == "chat":
         payload["player_slot"] = event["player_slot"]
-    return to_command(payload)
+    command = to_command(payload)
+    if event.get("phase") == "post_game":
+        command = command.replace(" chat ", " post_chat ", 1)
+    return command
 
 
 def disclosed_identity_reply(event):
@@ -298,6 +311,7 @@ def ask_provider(event, api_key, api_url, model, timeout, variants=(), dialogue=
         return local_reply
     message = {
         "mode": event.get("mode", "teams"),
+        "phase": event.get("phase", "playing"),
         "channel": event["channel"],
         "bot_tags_on": event.get("bot_tags_on") is True,
         "reply_language": "en" if event.get("kind") == "event" else chat_language(event["text"]),
@@ -447,7 +461,7 @@ class ReplyCache:
     @staticmethod
     def key(event):
         return "\x1f".join((event["map"], event.get("mode", "teams"),
-                            event["channel"], "en", event["text"]))
+                            event.get("phase", "playing"), event["channel"], "en", event["text"]))
 
     def variants(self, key):
         return [row[0] for row in self.db.execute(

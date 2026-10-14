@@ -290,6 +290,17 @@ private:
    float m_zoomCheckTime {}; // time to check zoom again
    float m_shieldCheckTime {}; // time to check shield drawing again
    float m_grenadeCheckTime {}; // time to check grenade usage
+   float m_nextHoldingUtilityTime {};
+   int m_lastHoldingUtilityNode { -1 };
+   int m_holdingUtilityThrows {};
+   bool m_proactiveUtility {};
+   Vector m_learnedHoldingSpot {};
+   Vector m_lastVisibleHoldingSpot {};
+   float m_lastVisibleHoldingTime {};
+   int m_learnedHoldingRound {};
+   int m_learnedHoldingTeam {};
+   bool m_learnedHoldingUsed {};
+   bool tryHoldingSpotUtility ();
    float m_sniperStopTime {}; // bot switched to other weapon?
    float m_lastEquipTime {}; // last time we equipped in buyzone
    float m_duckTime {}; // time to duck

@@ -1301,6 +1301,24 @@ void Bot::throwSmoke_ () {
    ignoreCollision ();
 
    Vector src = (m_plantCoverSmokeTarget.empty () ? m_lastEnemyOrigin : m_plantCoverSmokeTarget) - pev->velocity;
+   if (!m_plantCoverSmokeTarget.empty ()) {
+      // Tactical smoke uses the validated, frozen target and real trajectory.
+      m_grenade = calcThrow (getEyesPos (), m_plantCoverSmokeTarget);
+      if (m_grenade.lengthSq () < 100.0f) m_grenade = calcToss (getEyesPos (), m_plantCoverSmokeTarget);
+      if (m_grenade.lengthSq () < 100.0f || getTask ()->time < game.time ()) {
+         selectBestWeapon ();
+         completeTask ();
+         return;
+      }
+      m_aimFlags |= AimFlags::Grenade;
+      if (!game.isNullEntity (setCorrectGrenadeVelocity (kSmokeModelName))) return;
+      if (m_currentWeapon != Weapon::Smoke) {
+         if (pev->weapons & cr::bit (Weapon::Smoke)) selectWeaponById (Weapon::Smoke);
+         else { selectBestWeapon (); completeTask (); }
+      }
+      else if (!(m_oldButtons & IN_ATTACK)) pev->button |= IN_ATTACK;
+      return;
+   }
 
    // predict where the enemy is in secs
    if (m_plantCoverSmokeTarget.empty () && !game.isNullEntity (m_enemy)) {

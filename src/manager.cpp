@@ -6,6 +6,7 @@
 //
 
 #include <yapb.h>
+#include <map_callouts.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -43,6 +44,9 @@ void BotManager::logAiEvent (Bot *bot, edict_t *player, StringRef text, bool tea
          placeDistance = distance;
       }
    }
+   const auto modernPlace = modernMapCallout (game.getMapName (), place.chars ());
+   if (std::strcmp (modernPlace, place.chars ()) != 0) place = modernPlace;
+   for (auto &ch : place) if (ch == ' ') ch = '_';
    place.lowercase ();
    int visible[3] { -1, -1, -1 };
    int visibleCount = 0;
@@ -70,12 +74,13 @@ void BotManager::logAiEvent (Bot *bot, edict_t *player, StringRef text, bool tea
    char timestamp[20] {};
    const auto local = std::localtime (&now);
    if (local) std::strftime (timestamp, sizeof (timestamp), "%Y-%m-%d %H:%M:%S", local);
-   std::fprintf (stream, "%s (INFO): [YaPB ai] %s bot=%d player=%d channel=%s mode=%s bot_tags=%d team=%d map=%s place=%s weapon=%s hp=%d money=%d friends=%d enemies=%d bomb=%d round=%.0f visible=%d slots=%d,%d,%d text=%s\n",
+   std::fprintf (stream, "%s (INFO): [YaPB ai] %s bot=%d player=%d channel=%s mode=%s bot_tags=%d phase=%s team=%d map=%s place=%s weapon=%s hp=%d money=%d friends=%d enemies=%d bomb=%d round=%.0f visible=%d slots=%d,%d,%d text=%s\n",
       timestamp,
       canned ? "event" : "chat", bot->m_index, player ? game.indexOfPlayer (player) : -1,
       teamOnly ? "team" : "all", game.is (GameFlags::FreeForAll) ? "ffa" : "teams",
       engfuncs.pfnCVarGetFloat ("competitive_scoreboard_bot_tags") > 0.0f
          || engfuncs.pfnCVarGetFloat ("competitive_custom_game") > 0.0f,
+      isMatchCompleted () ? "post_game" : "playing",
       bot->m_team, game.getMapName (), place.chars (), weapon.chars (),
       static_cast <int> (bot->pev->health), bot->m_moneyAmount,
       bot->m_numFriendsLeft, bot->m_numEnemiesLeft, gameState.isBombPlanted (),
@@ -379,6 +384,7 @@ Bot *BotManager::findAliveBot () {
 void BotManager::frame () {
    // this function calls showframe function for all available at call moment bots
 
+   maintainCompetitiveLifecycle ();
    int teamSpeakers[kGameTeamNum] {};
    int freeForAllSpeakers = 0;
    for (const auto &bot : m_bots) {
@@ -402,7 +408,7 @@ void BotManager::frame () {
    for (const auto &bot : m_bots) {
       bot->frame ();
    }
-   processTeamOrderAcks ();
+   if (!isMatchCompleted ()) processTeamOrderAcks ();
    // A local sidecar drops one validated command at a time into this mailbox.
    // Polling is bounded and never waits for the provider or a network socket.
    static float nextAiPoll = 0.0f;
@@ -457,7 +463,9 @@ void BotManager::frame () {
                      pos += 7;
                      safe = number () && *pos == '\0';
                   }
-                  else if (std::strncmp (pos, "chat team ", 10) == 0 || std::strncmp (pos, "chat all ", 9) == 0) {
+                  else if (std::strncmp (pos, "post_chat ", 10) == 0
+                     || std::strncmp (pos, "chat team ", 10) == 0 || std::strncmp (pos, "chat all ", 9) == 0) {
+                     if (std::strncmp (pos, "post_chat ", 10) == 0) pos += 5;
                      pos += pos[5] == 't' ? 10 : 9;
                      if (*pos != '"') safe = number () && *pos++ == ' ';
                      safe = safe && *pos++ == '"';
@@ -480,6 +488,47 @@ void BotManager::frame () {
             }
          }
       }
+   }
+}
+
+bool BotManager::isMatchCompleted () const {
+   return engfuncs.pfnCVarGetFloat ("competitive_match_completed") > 0.0f;
+}
+
+void BotManager::maintainCompetitiveLifecycle () {
+   if (isMatchCompleted ()) {
+      if (!m_postGameStarted) {
+         m_postGameStarted = true;
+         m_postGameChatTime = game.time () + rg (1.5f, 3.0f);
+         m_postGameLines = 0;
+         m_pendingOrderAcks.clear ();
+         for (const auto &bot : m_bots) {
+            bot->m_speechQueue.clear ();
+            bot->m_msgQueue.clear ();
+            bot->m_pendingDeathLineTime = 0.0f;
+         }
+      }
+      if (m_postGameLines < 3 && game.time () >= m_postGameChatTime && !m_bots.empty ()) {
+         auto &speaker = m_bots[rg (0, m_bots.length <int> () - 1)];
+         constexpr const char *lines[] = { "gg", "well played", "thanks for the game", "good game everyone" };
+         speaker->sendAddressedReply (lines[m_postGameLines == 0 ? 0 : rg (1, 3)], false, true, true);
+         ++m_postGameLines;
+         m_postGameChatTime = game.time () + rg (4.0f, 7.0f);
+      }
+      return;
+   }
+   m_postGameStarted = false;
+   const int epoch = static_cast <int> (engfuncs.pfnCVarGetFloat ("competitive_bot_buy_epoch"));
+   if (epoch == m_competitiveBuyEpoch) return;
+   m_competitiveBuyEpoch = epoch;
+   // AMXX changes sides and strips weapons after YaPB's ordinary round reset.
+   // Reset again once its post-restart Money messages and team assignments finish.
+   for (const auto &bot : m_bots) bot->newRound ();
+   for (int team = 0; team < kGameTeamNum; ++team) {
+      updateTeamEconomics (team);
+      m_economyCallSent[team] = false;
+      m_economyCallTime[team] = game.time () + 0.25f;
+      m_buyReleaseTime[team] = game.time () + 0.5f;
    }
 }
 
@@ -965,11 +1014,9 @@ String BotManager::enemyCalloutPlace (const Vector &enemyPosition) {
    }
    // A map without a nearby named callout cannot supply an honest location.
    if (place.empty ()) return {};
-   if (place == "BombsiteA") place = "A";
-   else if (place == "BombsiteB") place = "B";
-   else if (place == "Middle") place = "mid";
-   else if (place == "DoubleDoors") place = "doors";
-   else if (place == "CTSpawn") place = "CT";
+   const auto modernPlace = modernMapCallout (game.getMapName (), place.chars ());
+   if (std::strcmp (modernPlace, place.chars ()) != 0) place = modernPlace;
+   if (place == "CTSpawn") place = "CT";
    else if (place == "TSpawn") place = "T";
    else if (place == "Tunnel") place = "tunnel";
    return place;
@@ -1092,6 +1139,10 @@ void BotManager::maintainEnemyCallouts () {
 
 void BotManager::maintainRoundChat () {
    if (!cv_round_chat || game.is (GameFlags::FreeForAll)) return;
+   const bool liveMatch = engfuncs.pfnCVarGetFloat ("competitive_match_live") > 0.0f;
+   const int liveRound = static_cast <int> (engfuncs.pfnCVarGetFloat ("competitive_score_t")
+      + engfuncs.pfnCVarGetFloat ("competitive_score_ct")) + 1;
+   if (!liveMatch) return;
    const bool roundOver = gameState.isRoundOver ();
    if (!roundOver && game.time () >= m_deadChatTime) {
       Bot *dead = nullptr;
@@ -1137,7 +1188,8 @@ void BotManager::maintainRoundChat () {
          sent = true;
          continue;
       }
-      if (!roundOver && game.mapIs (MapFlags::Demolition)
+      const bool greeting = !roundOver && liveRound == 1 && !m_matchGreetingSent[team];
+      if (!roundOver && !greeting && game.mapIs (MapFlags::Demolition)
          && !m_economyCallSent[team] && !m_humanCaptain[team]) continue;
       if (!roundOver && game.time () > gameState.getRoundStartTime () + 5.0f) {
          sent = true;
@@ -1156,16 +1208,17 @@ void BotManager::maintainRoundChat () {
          if (rg (1, eligible) == 1) speaker = bot.get ();
       }
       if (!speaker) continue;
-      constexpr const char *preLines[] = { "glhf", "we got this", "play smart", "let's focus" };
+      constexpr const char *preLines[] = { "we need this round", "lets hit back", "dont give them space", "make them work for it" };
       if (!roundOver && speaker->complainAboutPing (false)) {
          sent = true;
          continue;
       }
       constexpr const char *winLines[] = { "nice round", "good stuff", "clean", "well played" };
       const int variation = (m_roundChatNumber + speaker->m_index) % 4;
-      const char *line = !roundOver ? (m_roundChatNumber == 1 ? "glhf" : preLines[variation])
+      const char *line = !roundOver ? (greeting ? "glhf" : preLines[variation])
          : m_lastWinner == team ? winLines[variation] : "nt";
       speaker->sendAddressedReply (line, true, true);
+      if (greeting) m_matchGreetingSent[team] = true;
       sent = true;
       if (cv_comms_debug) logger.message ("[YaPB comms] phase=%s team=%d bot=%d line=%s",
          roundOver ? "post" : "pre", team, speaker->m_index, line);
@@ -2209,6 +2262,8 @@ Bot::Bot (edict_t *bot, int difficulty, int personality, int team, int skin) {
       break;
    }
    m_pingTemperament = pingTemperament (m_personality, rg (0, 99));
+   m_proactiveUtility = rg.chance (m_personality == Personality::Rusher ? 60
+      : m_personality == Personality::Normal ? 30 : 0);
    clearAmmoInfo ();
 
    m_currentWeapon = 0; // current weapon is not assigned at start
@@ -2473,6 +2528,17 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim, StringRef weapon
 
    // mark bot as "spawned", and reset it to new-round state when it dead (for csdm/zombie only)
    if (victimBot != nullptr) {
+      // Learn only this bot's observed position, never the killer's hidden origin.
+      if (!game.is (GameFlags::FreeForAll | GameFlags::CSDM) && killerTeam != victimTeam
+         && !victimBot->m_lastVisibleHoldingSpot.empty () && victimBot->m_lastVisibleHoldingTime > 0.0f
+         && victimBot->m_lastVisibleHoldingTime + 8.0f > game.time ()) {
+         victimBot->m_learnedHoldingSpot = victimBot->m_lastVisibleHoldingSpot;
+         victimBot->m_learnedHoldingRound = m_roundChatNumber;
+         victimBot->m_learnedHoldingTeam = victimTeam;
+         // Decide once for the next round, not repeatedly until chance succeeds.
+         victimBot->m_learnedHoldingUsed = !rg.chance (victimBot->m_personality == Personality::Careful ? 20
+            : victimBot->m_personality == Personality::Rusher ? 65 : 45);
+      }
       if (killerTeam != victimTeam && !game.is (GameFlags::CSDM | GameFlags::FreeForAll)) {
          const int deathNode = graph.getNearest (victim->v.origin, 512.0f);
          if (graph.exists (deathNode)) {
@@ -2602,6 +2668,11 @@ void Bot::newRound () {
    m_postPlantRepositioned = false;
    m_savingWeapon = false;
    m_plantCoverSmokeTarget.clear ();
+   m_nextHoldingUtilityTime = game.time () + rg (8.0f, 14.0f);
+   m_lastHoldingUtilityNode = kInvalidNodeIndex;
+   m_holdingUtilityThrows = 0;
+   m_lastVisibleHoldingSpot.clear ();
+   m_lastVisibleHoldingTime = 0.0f;
    m_nextPostPlantRouteTime = 0.0f;
    m_nextBhopBurstTime = game.time () + rg (4.0f, 8.0f);
    m_nextBhopKnifeSwitchTime = 0.0f;
@@ -3263,8 +3334,9 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
    if (game.isBotCmd ()) {
       return;
    }
+   if (isMatchCompleted () && cmd != "say" && cmd != "say_team") return;
 
-   if (!game.is (GameFlags::FreeForAll) && (cmd == "say" || cmd == "say_team")
+   if (!isMatchCompleted () && !game.is (GameFlags::FreeForAll) && (cmd == "say" || cmd == "say_team")
       && !game.isFakeClientEntity (ent)) {
       const int speakerTeam = game.getRealPlayerTeam (ent);
       if (speakerTeam == Team::CT || speakerTeam == Team::Terrorist) {
@@ -3281,7 +3353,7 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
       }
    }
 
-   if (!game.is (GameFlags::FreeForAll) && cmd == "say_team"
+   if (!isMatchCompleted () && !game.is (GameFlags::FreeForAll) && cmd == "say_team"
       && !game.isFakeClientEntity (ent) && game.isAliveEntity (ent)) {
       TeamAllocation allocation {};
       if (parseTeamAllocation (engfuncs.pfnCmd_Args (), allocation)) {
@@ -3634,7 +3706,7 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
 
    // A short apology is addressed to the bot this player just damaged, even
    // without a bot name or question. Keep it tied to the actual attacker.
-   if (!game.is (GameFlags::FreeForAll) && !game.isFakeClientEntity (ent)
+   if (!isMatchCompleted () && !game.is (GameFlags::FreeForAll) && !game.isFakeClientEntity (ent)
       && (cmd == "say" || cmd == "say_team")) {
       char words[97] {};
       bool question = false;
@@ -3973,6 +4045,7 @@ void BotManager::selectLeaders (int team, bool reset) {
 
 void BotManager::initRound () {
    // this is called at the start of each round
+   if (isMatchCompleted ()) return;
 
    // check team economics
    for (int team = 0; team < kGameTeamNum; ++team) {
@@ -3994,8 +4067,9 @@ void BotManager::initRound () {
       m_preRoundChatTime[team] = cr::max (game.time () + rg (1.5f, 3.0f),
          gameState.getRoundStartTime () + 0.75f);
       m_postRoundChatTime[team] = 0.0f;
-      m_preRoundChatSent[team] = false;
-      m_postRoundChatSent[team] = false;
+      m_preRoundChatSent[team] = (engfuncs.pfnCVarGetFloat ("competitive_score_t")
+         + engfuncs.pfnCVarGetFloat ("competitive_score_ct") > 0.0f) && rg.chance (75);
+      m_postRoundChatSent[team] = rg.chance (65);
       m_flashFeedbackSent[team] = false;
       m_lastHumanFlashMention[team] = 0.0f;
       m_dropOfferPhase[team] = 0;

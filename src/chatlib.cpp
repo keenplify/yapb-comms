@@ -7,6 +7,7 @@
 
 #include <yapb.h>
 #include <tactical_comms.h>
+#include <map_callouts.h>
 
 ConVar cv_chat ("chat", "0", "Enables or disables bot chat functionality.");
 ConVar cv_chat_percent ("chat_percent", "30", "Bot's chance to send random dead chat when killed.", true, 0.0f, 100.0f);
@@ -417,6 +418,14 @@ void Bot::checkForChat () {
 }
 
 static void normalizeBotChat (String &line) {
+   // Apply the same map-aware abbreviations to direct and AI-generated chat.
+   auto words = line.split (" ");
+   String modern {};
+   for (const auto &word : words) {
+      if (!modern.empty ()) modern.append (" ");
+      modern.append (modernMapCallout (game.getMapName (), word.chars ()));
+   }
+   line = modern;
    for (auto &ch : line) {
       if (ch >= 'A' && ch <= 'Z') ch = static_cast <char> (ch + ('a' - 'A'));
    }
