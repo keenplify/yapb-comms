@@ -49,6 +49,8 @@ private:
    float m_quotaMaintainTime {}; // time to maintain bot quota
    float m_plantSearchUpdateTime {}; // time to update for searching planted bomb
    float m_lastChatTime {}; // global chat time timestamp
+   HashMap <String, bool> m_usedChatPhrases {}; // shared by all bots for this map
+   float m_chatPhraseMapTime {};
    float m_lastAddressedReplyTime[kGameMaxPlayers] {}; // per-player reply rate limit
    int m_lastChatPartner[kGameMaxPlayers] {};
    String m_lastChatPartnerName[kGameMaxPlayers] {};
@@ -130,6 +132,7 @@ protected:
    BotCreateResult create (StringRef name, int difficulty, int personality, int team, int skin);
 
 public:
+   bool claimChatPhrase (StringRef phrase);
    BotManager ();
    ~BotManager () = default;
 

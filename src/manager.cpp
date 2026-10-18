@@ -155,6 +155,19 @@ BotManager::BotManager () {
    initFilters ();
 }
 
+bool BotManager::claimChatPhrase (StringRef phrase) {
+   const float now = game.time ();
+   if (now < m_chatPhraseMapTime) m_usedChatPhrases.clear ();
+   m_chatPhraseMapTime = now;
+   String key { phrase };
+   key.trim ();
+   key.lowercase ();
+   if (key.empty () || m_usedChatPhrases.exists (key)) return false;
+   m_usedChatPhrases[key] = true;
+   logger.message ("[YaPB ai] used_phrase text=%s", key.chars ());
+   return true;
+}
+
 void BotManager::createKillerEntity () {
    // this function creates single trigger_hurt for using in Bot::kill, to reduce lags, when killing all the bots
 
@@ -1156,7 +1169,7 @@ void BotManager::maintainRoundChat () {
       }
       if (dead) {
          constexpr const char *lines[] = { "my bad", "unlucky", "nice try", "im watching" };
-         dead->sendAddressedReply (lines[(m_roundChatNumber + dead->m_index) % 4], true, true);
+         dead->sendAddressedReply (lines[(m_roundChatNumber + dead->m_index) % 4], true);
          m_deadChatTime = game.time () + rg (18.0f, 28.0f);
       }
       else m_deadChatTime = game.time () + 3.0f;

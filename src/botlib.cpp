@@ -3242,6 +3242,9 @@ void Bot::update () {
       if (!validEnemyIntel) {
          // Drop stale health intel rather than calling a dead enemy low.
       }
+      else if (!bots.claimChatPhrase (line.text)) {
+         // A different bot already said this during this game.
+      }
       else if (game.is (GameFlags::Legacy)) {
          sendToChatLegacy (line.text, line.teamOnly);
       }

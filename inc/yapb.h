@@ -319,6 +319,10 @@ private:
    BotViewTiming m_viewTiming {}; // separate navigation view and combat think clocks
    float m_aimErrorTime {}; // time to update error vector
    float m_nextCampDirTime {}; // time next camp direction change
+   float m_nextCampJiggleTime {};
+   float m_campJiggleStepTime {};
+   int m_campJiggleSteps {};
+   int m_campJiggleSide {};
    float m_lastFightStyleCheck {}; // time checked style
    float m_strafeSetTime {}; // time strafe direction was set
    float m_randomizeAnglesTime {}; // time last randomized location

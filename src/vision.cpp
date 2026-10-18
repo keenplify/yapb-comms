@@ -162,8 +162,8 @@ void Bot::updateLookAngles (bool navigationOnly) {
       && task != Task::PlantBomb && task != Task::DefuseBomb;
    if (idleLook) {
       if (game.time () >= m_idleAim.nextChange) {
-         m_idleAim.target (rg (-3.0f, 3.0f), rg (-6.0f, 6.0f));
-         m_idleAim.nextChange = game.time () + rg (2.0f, 4.5f);
+         m_idleAim.target (rg (-7.0f, 7.0f), rg (-8.0f, 8.0f));
+         m_idleAim.nextChange = game.time () + rg (1.5f, 3.0f);
       }
       m_idleAim.advance (delta);
       direction.x += m_idleAim.pitch;

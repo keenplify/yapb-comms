@@ -10,12 +10,12 @@ struct IdleAimDrift {
    float nextChange = 0.0f;
 
    void target (float y, float p) {
-      targetYaw = bounded (y, -3.0f, 3.0f);
-      targetPitch = bounded (p, -6.0f, 6.0f);
+      targetYaw = bounded (y, -7.0f, 7.0f);
+      targetPitch = bounded (p, -8.0f, 8.0f);
    }
    void advance (float delta) {
       // Slow wandering, independent of the frame rate; no random per-frame jitter.
-      const float step = bounded (delta, 0.0f, 0.1f) * 2.5f;
+      const float step = bounded (delta, 0.0f, 0.1f) * 5.0f;
       yaw += bounded (targetYaw - yaw, -step, step);
       pitch += bounded (targetPitch - pitch, -step, step);
    }

@@ -444,6 +444,7 @@ void Bot::sendToChat (StringRef message, bool teamOnly) {
    String line { message };
    normalizeBotChat (line);
    if (line.empty ()) return;
+   if (!bots.claimChatPhrase (line)) return;
 
    // special handling for legacy games
    if (game.is (GameFlags::Legacy)) {

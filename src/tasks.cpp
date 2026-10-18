@@ -653,6 +653,46 @@ void Bot::camp_ () {
    m_moveSpeed = 0.0f;
    m_strafeSpeed = 0.0f;
 
+   // A short left/right peek gives a held angle life without changing combat
+   // movement. Do not strafe from crouch points, ledges, or into walls.
+   const bool safeJiggle = !(m_states & Sense::SeeingEnemy) && game.isNullEntity (m_enemy)
+      && !m_isStuck && !m_hasProgressBar && !m_isReloading
+      && !(m_campButtons & IN_DUCK) && isOnFloor () && !isOnLadder () && !isInWater ()
+      && !(m_pathFlags & (NodeFlag::Crouch | NodeFlag::Narrow | NodeFlag::Ladder | NodeFlag::Lift));
+   if (!safeJiggle) {
+      m_campJiggleSteps = 0;
+      m_nextCampJiggleTime = game.time () + 3.0f;
+   }
+   else {
+      if (!m_campJiggleSteps && game.time () >= m_nextCampJiggleTime) {
+         m_campJiggleSteps = 4;
+         m_campJiggleSide = rg.chance (50) ? 1 : -1;
+         m_campJiggleStepTime = game.time () + 0.14f;
+      }
+      if (m_campJiggleSteps) {
+         if (game.time () >= m_campJiggleStepTime) {
+            --m_campJiggleSteps;
+            m_campJiggleSide = -m_campJiggleSide;
+            m_campJiggleStepTime = game.time () + 0.14f;
+            if (!m_campJiggleSteps) m_nextCampJiggleTime = game.time () + rg (4.0f, 7.0f);
+         }
+         if (m_campJiggleSteps) {
+            const auto side = m_moveAngles.right ().normalize2d_apx () * static_cast <float> (m_campJiggleSide);
+            const auto target = pev->origin + side * 18.0f;
+            TraceResult wall {}, floor {};
+            game.testHull (pev->origin, target, TraceIgnore::Monsters, head_hull, ent (), &wall);
+            game.testLine (target, target - Vector (0.0f, 0.0f, 48.0f), TraceIgnore::Monsters, ent (), &floor);
+            if (wall.flFraction > 0.95f && floor.flFraction < 0.9f) {
+               m_strafeSpeed = pev->maxspeed * 0.16f * static_cast <float> (m_campJiggleSide);
+            }
+            else {
+               m_campJiggleSteps = 0;
+               m_nextCampJiggleTime = game.time () + 5.0f;
+            }
+         }
+      }
+   }
+
    findValidNode ();
 
    // random camp dir, or prediction
