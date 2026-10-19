@@ -6,6 +6,7 @@
 //
 
 #include <yapb.h>
+#include <graph_clearance.h>
 
 ConVar cv_graph_analyze_auto_start ("graph_analyze_auto_start", "1", "Autostart analyzer if all other cases fail.");
 ConVar cv_graph_analyze_auto_save ("graph_analyze_auto_save", "1", "Auto save results of analysis to graph file and re-add bots.");
@@ -15,14 +16,89 @@ ConVar cv_graph_analyze_fps ("graph_analyze_fps", "30.0", "The FPS at which the 
 ConVar cv_graph_analyze_clean_paths_on_finish ("graph_analyze_clean_paths_on_finish", "1", "Specifies if the analyzer should clean unnecessary paths upon finishing.");
 ConVar cv_graph_analyze_optimize_nodes_on_finish ("graph_analyze_optimize_nodes_on_finish", "1", "Specifies if the analyzer should merge some near-placed nodes with many connections together.");
 ConVar cv_graph_analyze_mark_goals_on_finish ("graph_analyze_mark_goals_on_finish", "1", "Specifies if the analyzer should mark nodes as map goals automatically upon finishing.");
+ConVar cv_graph_analyze_swarm ("graph_analyze_swarm", "0", "Experimental dedicated-server graph exploration with CPU/RAM-sized input-only bots. Enable before loading a map without a graph.", true, 0.0f, 1.0f);
+
+void GraphAnalyze::resumeWorkers () {
+   if (m_pausedWorkers != 0) worker.startup (m_pausedWorkers);
+   m_pausedWorkers = 0;
+}
+
+bool GraphAnalyze::repopulate (int seed) {
+   if (m_isAnalyzing || graph.length () < kMaxNodeLinks
+      || (seed != -1 && seed != -3 && (!graph.exists (seed) || (graph[seed].flags & NodeFlag::Ladder)))) {
+      ctrl.msg ("Repopulate needs an idle server, an existing graph, and a valid floor seed (or all).");
+      return false;
+   }
+   if (bots.getBotCount () != 0) {
+      ctrl.msg ("Remove bots first with yb kickall. Repopulate keeps the analysis server empty.");
+      return false;
+   }
+   for (const auto &client : util.getClients ()) {
+      if ((client.flags & ClientFlags::Used) && client.ent && (client.team == Team::CT || client.team == Team::Terrorist)) {
+         ctrl.msg ("Switch every player to spectator first (jointeam 6), then repopulate using the landing node index.");
+         return false;
+      }
+   }
+   const auto filename = bstor.buildPath (BotFile::Graph);
+   if (plat.fileExists (filename.chars ())) {
+      File original (filename, "rb");
+      if (!original) { ctrl.msg ("Cannot read the existing graph for backup; repopulate cancelled."); return false; }
+      String backupName {};
+      for (int attempt = 0; attempt < 10000; ++attempt) {
+         backupName = strings.format ("%s.before-repopulate-%d-%d.bak", filename.chars (), static_cast <int> (plat.seconds ()), attempt);
+         if (!plat.fileExists (backupName.chars ())) break;
+         backupName.clear ();
+      }
+      if (backupName.empty ()) return false;
+      File backup (backupName, "wb");
+      if (!backup) { ctrl.msg ("Cannot create graph backup; repopulate cancelled."); return false; }
+      unsigned char buffer[4096] {};
+      auto remaining = original.length ();
+      while (remaining > 0) {
+         const auto chunk = cr::min (remaining, sizeof (buffer));
+         if (original.read (buffer, 1, chunk) != chunk || backup.write (buffer, 1, chunk) != chunk) {
+            ctrl.msg ("Graph backup failed; repopulate cancelled.");
+            return false;
+         }
+         remaining -= chunk;
+      }
+      if (backup.flush ()) { ctrl.msg ("Graph backup flush failed; repopulate cancelled."); return false; }
+      ctrl.msg ("Previous graph backed up to %s.", backupName.chars ());
+   }
+   // Drain readers before changing the graph; save manual edits as the restart
+   // point. Do not optimize, move nodes, or rewrite their narrow-place flags.
+   m_pausedWorkers = worker.available () ? static_cast <int> (engfuncs.pfnCVarGetFloat ("yb_threadpool_workers")) : 0;
+   worker.shutdown ();
+   if (!graph.saveGraphData (true)) {
+      resumeWorkers ();
+      ctrl.msg ("Cannot save manual edits; repopulate cancelled.");
+      return false;
+   }
+   graph.cancelLearnJump ();
+   graph.clearEditFlag (GraphEdit::Auto);
+   m_repopulating = true;
+   m_repopulateSeed = seed;
+   start ();
+   if (seed == -3) ctrl.msg ("Prune started. Checking walking links; nodes and jump routes are retained. Spectators only.");
+   else ctrl.msg ("Repopulate started from %s. Existing nodes and jump links are retained. Spectators only.",
+      seed == -1 ? "all nodes" : strings.format ("node %d", seed));
+   return m_isAnalyzing;
+}
 
 void GraphAnalyze::start () {
    if (m_isAnalyzing) {
       return;
    }
 
+   m_exploring = m_repopulating || cv_graph_analyze_swarm.as <int> () != 0;
+   m_isCrouch = false;
+   if (m_exploring && ((!game.isDedicated () && !m_repopulating) || bots.getBotCount () != 0)) {
+      ctrl.msg ("Swarm analysis requires a dedicated analysis server without existing bots.");
+      return;
+   }
+
    // start analyzer in few seconds after level initialized
-   if (cv_graph_analyze_auto_start) {
+   if (m_repopulating || cv_graph_analyze_auto_start) {
       m_updateInterval = game.time () + 3.0f;
       m_basicsCreated = false;
       m_hazards.clear ();
@@ -76,6 +152,30 @@ void GraphAnalyze::start () {
 
 void GraphAnalyze::update () {
    if (cr::fzero (m_updateInterval) || !m_isAnalyzing) {
+      return;
+   }
+
+   if (m_exploring) {
+      if (!m_repopulating && !cv_graph_analyze_swarm) {
+         suspend ();
+         ctrl.msg ("Swarm analysis cancelled; partial graph was not saved.");
+         return;
+      }
+      if (!m_basicsCreated) {
+         if (game.time () < m_updateInterval) return;
+         m_basicsCreated = true;
+         explorer.start (m_repopulating ? m_repopulateSeed : -2);
+      }
+      if (explorer.update ()) {
+         const bool failed = explorer.failed ();
+         explorer.stop ();
+         if (failed) {
+            suspend ();
+         }
+         else {
+            finish ();
+         }
+      }
       return;
    }
 
@@ -155,12 +255,19 @@ void GraphAnalyze::update () {
    }
 }
 
-void GraphAnalyze::suspend () {
+void GraphAnalyze::suspend (bool restoreWorkers) {
+   explorer.stop ();
    m_updateInterval = kInfiniteDistance;
    m_isAnalyzing = false;
    m_isAnalyzed = false;
    m_basicsCreated = false;
    m_hazards.clear ();
+   m_exploring = false;
+   m_repopulating = false;
+   m_repopulateSeed = -2;
+   if (restoreWorkers) resumeWorkers ();
+   else m_pausedWorkers = 0;
+   graph.setMessageSilence (false);
 }
 
 bool GraphAnalyze::pathTouchesHazard (const Vector &from, const Vector &to) const {
@@ -174,10 +281,10 @@ bool GraphAnalyze::pathTouchesHazard (const Vector &from, const Vector &to) cons
 
 void GraphAnalyze::finish () {
    // run optimization on finish
-   optimize ();
+   if (!m_exploring) optimize (); // do not move physically verified endpoints
 
    // mark goal nodes
-   markGoals ();
+   if (!m_repopulating) markGoals ();
 
    m_isAnalyzed = true;
    m_isAnalyzing = false;
@@ -189,21 +296,33 @@ void GraphAnalyze::finish () {
    ctrl.msg ("Completed map analysis.");
 
    // auto save bots graph
-   if (cv_graph_analyze_auto_save) {
-      if (!graph.saveGraphData ()) {
+   if (m_repopulating || cv_graph_analyze_auto_save) {
+      auto editor = graph.getEditor ();
+      int editFlags = 0;
+      for (int flag : { GraphEdit::On, GraphEdit::Noclip }) if (graph.hasEditFlag (flag)) editFlags |= flag;
+      if (!graph.saveGraphData (m_repopulating)) {
          ctrl.msg ("Can't save analyzed graph. Internal error.");
+         resumeWorkers ();
          return;
       }
-
       if (!graph.loadGraphData ()) {
          ctrl.msg ("Can't load analyzed graph. Internal error.");
+         resumeWorkers ();
          return;
+      }
+      if (m_repopulating && !game.isNullEntity (editor)) {
+         graph.setEditor (editor);
+         graph.setEditFlag (editFlags);
       }
       vistab.startRebuild ();
       ctrl.enableDrawModels (false);
 
-      cv_quota.revert ();
+      if (!m_exploring) cv_quota.revert ();
    }
+   if (m_repopulating) ctrl.msg (m_repopulateSeed == -3 ? "Pruned graph saved; resume play when ready." : "Repopulate complete. Expanded graph saved; resume play when ready.");
+   m_repopulating = false;
+   m_repopulateSeed = -2;
+   resumeWorkers ();
 }
 
 void GraphAnalyze::optimize () {
@@ -238,10 +357,12 @@ void GraphAnalyze::optimize () {
          continue;
       }
       const auto &path = graph[i];
+      const bool crouch = (path.flags & NodeFlag::Crouch) != 0;
       Array <int> indexes {};
 
       for (const auto &link : path.links) {
          if (graph.exists (link.index) && !m_optimizedNodes[link.index]
+            && ((graph[link.index].flags & NodeFlag::Crouch) != 0) == crouch
             && !AStarAlgo::cantSkipNode (path.number, link.index, true)) {
 
             indexes.emplace (link.index);
@@ -256,9 +377,30 @@ void GraphAnalyze::optimize () {
             continue;
          }
 
+         // Averaging nodes around a corner can put the replacement in a thin
+         // wall. Validate its volume and routes before deleting any originals.
+         TraceResult clearance {};
+         game.testHull (pos, pos, TraceIgnore::Monsters, crouch ? head_hull : human_hull, nullptr, &clearance);
+         if (!graphTraceIsClear (clearance)) {
+            continue;
+         }
+         bool canMerge = graph.isNodeReacheable (path.origin, pos)
+            && graph.isNodeReacheable (pos, path.origin);
+         for (const auto &index : indexes) {
+            if (!graph.isNodeReacheable (graph[index].origin, pos)
+               || !graph.isNodeReacheable (pos, graph[index].origin)) {
+               canMerge = false;
+               break;
+            }
+         }
+         if (!canMerge) {
+            continue;
+         }
+
          for (const auto &index : indexes) {
             graph.erase (index);
          }
+         m_isCrouch = crouch;
          graph.add (NodeAddFlag::Normal, pos);
       }
    }
@@ -351,7 +493,8 @@ void GraphAnalyze::flood (const Vector &pos, const Vector &next, float range) {
    game.testHull (pos, { next.x, next.y, next.z + 19.0f }, TraceIgnore::Monsters, head_hull, nullptr, &tr);
 
    // we're can't reach next point
-   if (!cr::fequal (tr.flFraction, 1.0f) && !game.isBreakableEntity (tr.pHit)) {
+   if (tr.fStartSolid || tr.fAllSolid
+      || (!graphTraceIsClear (tr) && !game.isBreakableEntity (tr.pHit))) {
       return;
    }
 
@@ -362,7 +505,7 @@ void GraphAnalyze::flood (const Vector &pos, const Vector &next, float range) {
    game.testHull (tr.vecEndPos, { tr.vecEndPos.x, tr.vecEndPos.y, tr.vecEndPos.z - 999.0f }, TraceIgnore::Monsters, head_hull, nullptr, &tr);
 
    // ground is away for a break
-   if (cr::fequal (tr.flFraction, 1.0f)) {
+   if (tr.fStartSolid || tr.fAllSolid || tr.flFraction >= 1.0f) {
       return;
    }
    const Vector &nextPos = { tr.vecEndPos.x, tr.vecEndPos.y, tr.vecEndPos.z + 19.0f };
@@ -377,19 +520,23 @@ void GraphAnalyze::flood (const Vector &pos, const Vector &next, float range) {
 
    // re-check there's nothing nearby, and add something we're want
    if (!graph.exists (graph.getNearestNoBuckets (nextPos, range))) {
-      m_isCrouch = false;
-      game.testLine (nextPos, { nextPos.x, nextPos.y, nextPos.z + 36.0f }, TraceIgnore::Monsters, nullptr, &tr);
-
-      if (!cr::fequal (tr.flFraction, 1.0f)) {
-         m_isCrouch = true;
+      // Check the whole player volume, including ceiling edges beside the
+      // center line. GoldSrc hulls are 72 units standing and 36 crouching.
+      game.testHull (nextPos, nextPos, TraceIgnore::Monsters, human_hull, nullptr, &tr);
+      m_isCrouch = !graphTraceIsClear (tr);
+      const auto nodePos = m_isCrouch ? nextPos - Vector (0.0f, 0.0f, 18.0f) : nextPos;
+      if (m_isCrouch) {
+         game.testHull (nodePos, nodePos, TraceIgnore::Monsters, head_hull, nullptr, &tr);
+         if (!graphTraceIsClear (tr)) {
+            return;
+         }
       }
-      auto testPos = m_isCrouch ? Vector { nextPos.x, nextPos.y, nextPos.z - 18.0f } : nextPos;
 
-      if ((graph.isNodeReacheable (targetPos, testPos)
-         && graph.isNodeReacheable (testPos, targetPos)) || (graph.isNodeReacheableWithJump (testPos, targetPos)
-            && graph.isNodeReacheableWithJump (targetPos, testPos))) {
+      if ((graph.isNodeReacheable (targetPos, nodePos)
+         && graph.isNodeReacheable (nodePos, targetPos)) || (graph.isNodeReacheableWithJump (nodePos, targetPos)
+            && graph.isNodeReacheableWithJump (targetPos, nodePos))) {
 
-         graph.add (NodeAddFlag::Normal, m_isCrouch ? Vector { nextPos.x, nextPos.y, nextPos.z - 9.0f } : nextPos);
+         graph.add (NodeAddFlag::Normal, nodePos);
       }
    }
 }

@@ -3142,6 +3142,10 @@ void Bot::checkParachute () {
 }
 
 void Bot::frame () {
+   if (m_graphExplorer) {
+      explorer.frame (*this);
+      return;
+   }
    if (bots.isMatchCompleted ()) {
       update ();
       return;
@@ -4341,8 +4345,10 @@ void Bot::runMovement () {
       }
       m_requestedJump = false;
    }
-   tryBhop ();
-   tryGroundStrafe ();
+   if (!(m_currentTravelFlags & (PathFlag::InputVerified | PathFlag::InputSimulated))) {
+      tryBhop ();
+      tryGroundStrafe ();
+   }
 
    const bool navigationView = m_isAlive && !m_isCreature && usesNavigationAim ();
    runMovementPreservingView (navigationView, pev->v_angle, [this, msecVal] {

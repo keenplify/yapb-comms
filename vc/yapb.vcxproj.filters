@@ -138,6 +138,21 @@
     <ClInclude Include="..\inc\analyze.h">
       <Filter>inc</Filter>
     </ClInclude>
+    <ClInclude Include="..\inc\explore.h">
+      <Filter>inc</Filter>
+    </ClInclude>
+    <ClInclude Include="..\inc\graph_clearance.h">
+      <Filter>inc</Filter>
+    </ClInclude>
+    <ClInclude Include="..\inc\virtual_player.h">
+      <Filter>inc</Filter>
+    </ClInclude>
+    <ClInclude Include="..\inc\graph_exploration.h">
+      <Filter>inc</Filter>
+    </ClInclude>
+    <ClInclude Include="..\inc\graph_jump_recording.h">
+      <Filter>inc</Filter>
+    </ClInclude>
     <ClInclude Include="..\inc\practice.h">
       <Filter>inc</Filter>
     </ClInclude>
@@ -246,6 +261,9 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\analyze.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\explore.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\planner.cpp">

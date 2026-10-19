@@ -6,6 +6,7 @@
 //
 
 #include <yapb.h>
+#include <graph_exploration.h>
 
 ConVar cv_has_team_semiclip ("has_team_semiclip", "0", "When enabled, bots will not try to avoid teammates on their way. Assumes that some semiclip plugins are in use.");
 ConVar cv_graph_slope_height ("graph_slope_height", "24.0", "Determines the maximum slope height change between the current and next node to consider the current link as a jump link. Only for generated graphs.", true, 12.0f, 48.0f);
@@ -1047,6 +1048,7 @@ void Bot::moveToGoal () {
    if (!(m_pathFlags & NodeFlag::Ladder)
       && isPreviousLadder ()
       && isOnLadder ()
+      && !(m_currentTravelFlags & PathFlag::InputLadder)
       && m_pathOrigin.z < pev->origin.z) {
 
       pev->button |= IN_JUMP;
@@ -1127,7 +1129,29 @@ bool Bot::updateNavigation () {
    m_destOrigin = m_pathOrigin;
 
    // this node has additional travel flags - care about them
-   if (m_currentTravelFlags & PathFlag::Jump) {
+   if (m_currentTravelFlags & (PathFlag::InputVerified | PathFlag::InputSimulated)) {
+      if ((m_currentTravelFlags & PathFlag::InputBreakable) && game.isNullEntity (m_enemy)) {
+         TraceResult obstacle {};
+         game.testHull (pev->origin, m_pathOrigin, TraceIgnore::Monsters, isDucking () ? head_hull : human_hull, ent (), &obstacle);
+         if (game.isBreakableEntity (obstacle.pHit)) {
+            checkBreakable (obstacle.pHit);
+            m_moveSpeed = m_strafeSpeed = 0;
+            return false;
+         }
+      }
+      m_checkTerrain = false;
+      if (m_currentTravelFlags & PathFlag::InputCrouch) pev->button |= IN_DUCK;
+      if ((m_currentTravelFlags & PathFlag::InputAirDuck) && (!isOnFloor () || m_jumpFinished)) pev->button |= IN_DUCK;
+      if ((m_currentTravelFlags & PathFlag::Jump) && !m_jumpFinished && isOnFloor ()
+         && graph.exists (m_previousNodes[0])
+         && pev->origin.distanceSq2d (graph[m_previousNodes[0]].origin) >= cr::sqrf (kExploreJumpRunup)) {
+         pev->button |= IN_JUMP;
+         m_jumpFinished = true;
+         m_desiredVelocity.clear ();
+         m_currentTravelFlags &= ~PathFlag::Jump;
+      }
+   }
+   else if (m_currentTravelFlags & PathFlag::Jump) {
 
       // bot is not jumped yet?
       if (!m_jumpFinished) {
@@ -1448,7 +1472,18 @@ bool Bot::updateNavigation () {
       passedNodeDuringHop = (toNode | velocity) <= 0.0f && (toNext | velocity) > 0.0f;
    }
 
-   if (nodeDistanceSq < desiredDistanceSq || passedNodeDuringHop) {
+   // Physically tested links require an actual landing; ordinary radius and
+   // prediction shortcuts can advance while still above a parkour platform.
+   const bool inputVerified = (m_currentTravelFlags & (PathFlag::InputVerified | PathFlag::InputSimulated)) != 0;
+   const bool ladderTarget = (m_currentTravelFlags & PathFlag::InputLadder) && (m_pathFlags & NodeFlag::Ladder);
+   const bool ladderArrival = ladderTarget && isOnLadder () && pev->origin.distanceSq (m_pathOrigin) <= cr::sqrf (16.0f);
+   const bool verifiedLanding = ladderArrival || (!ladderTarget && isOnFloor () && pev->origin.distanceSq2d (m_pathOrigin) <= cr::sqrf (12.0f)
+      && cr::abs ((pev->origin.z + pev->mins.z) - (m_pathOrigin.z - ((m_pathFlags & NodeFlag::Crouch) ? 18.0f : 36.0f))) < 8.0f);
+   if (inputVerified ? verifiedLanding : (nodeDistanceSq < desiredDistanceSq || passedNodeDuringHop)) {
+      if ((m_currentTravelFlags & PathFlag::InputLadder) && cv_debug.as <int> () >= 4) {
+         debugMsg ("ladder replay node=%d attached=%d grounded=%d z=%.1f target_z=%.1f",
+            m_currentNodeIndex, isOnLadder (), isOnFloor (), pev->origin.z, m_pathOrigin.z);
+      }
       // did we reach a destination node?
       if (getTask ()->data == m_currentNodeIndex) {
          if (m_chosenGoalIndex != kInvalidNodeIndex) {
@@ -2583,7 +2618,8 @@ bool Bot::advanceMovement () {
             }
 
             // if graph is analyzed try our special jumps
-            if ((graph.isAnalyzed () || analyzer.isAnalyzed ()) && !(m_path->flags & NodeFlag::Ladder)) {
+            if ((graph.isAnalyzed () || analyzer.isAnalyzed ()) && !(m_path->flags & NodeFlag::Ladder)
+               && !(m_currentTravelFlags & (PathFlag::InputVerified | PathFlag::InputSimulated))) {
                for (const auto &link : m_path->links) {
                   if (link.index == destIndex) {
                      const float diff = cr::abs (m_path->origin.z - graph[destIndex].origin.z);

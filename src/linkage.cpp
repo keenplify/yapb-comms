@@ -388,9 +388,9 @@ CR_EXPORT int GetEntityAPI (gamefuncs_t *table, int interfaceVersion) {
       game.slowFrame ();
 
       // rebuild vistable if needed
-      vistab.rebuild ();
+      if (!analyzer.isExploring ()) vistab.rebuild ();
 
-      if (bots.hasBotsOnline ()) {
+      if (bots.hasBotsOnline () && !analyzer.isExploring ()) {
          // keep track of grenades on map
          gameState.updateActiveGrenade ();
 
@@ -402,7 +402,7 @@ CR_EXPORT int GetEntityAPI (gamefuncs_t *table, int interfaceVersion) {
       bots.maintainQuota ();
 
       // balance bot difficulties
-      bots.balanceBotDifficulties ();
+      if (!analyzer.isExploring ()) bots.balanceBotDifficulties ();
 
       // flush print queue to users
       ctrl.flushPrintQueue ();
@@ -471,6 +471,10 @@ CR_EXPORT int GetEntityAPI (gamefuncs_t *table, int interfaceVersion) {
    };
 
    table->pfnKeyValue = [] (edict_t *ent, KeyValueData *kvd) CR_FORCE_STACK_ALIGN {
+      if (kvd && kvd->szKeyName && kvd->szValue && strcmp (kvd->szKeyName, "classname") == 0) {
+         if (strcmp (kvd->szValue, "worldspawn") == 0) explorer.clearMaterials ();
+         if (strcmp (kvd->szValue, "func_breakable") == 0) explorer.recordMaterial (ent, 0);
+      }
       // this function is called when the game requests a pointer to some entity's keyvalue data.
       // The keyvalue data is held in each entity's infobuffer (basically a char buffer where each
       // game DLL can put the stuff it wants) under - as it says - the form of a key/value pair. A
@@ -481,6 +485,7 @@ CR_EXPORT int GetEntityAPI (gamefuncs_t *table, int interfaceVersion) {
 
       if (!game.isNullEntity (ent) && strcmp (ent->v.classname.chars (), "func_breakable") == 0) {
          if (kvd && kvd->szKeyName && strcmp (kvd->szKeyName, "material") == 0) {
+            explorer.recordMaterial (ent, atoi (kvd->szValue));
             if (atoi (kvd->szValue) == 7) {
                game.markBreakableAsInvalid (ent);
             }
@@ -1027,6 +1032,9 @@ CR_EXPORT int Meta_Detach (PLUG_LOADTIME now, PL_UNLOAD_REASON reason) {
       gpMetaUtilFuncs->pfnLogError (PLID, "%s: plugin NOT detaching (can't unload plugin right now)", Plugin_info.name);
       return HLFalse; // returning FALSE prevents metamod from unloading this plugin
    }
+   // Restore analysis-owned entity state before hooks and workers go away.
+   if (analyzer.isAnalyzing ()) analyzer.suspend (false);
+
    // stop the worker
    worker.shutdown ();
 

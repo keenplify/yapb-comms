@@ -22,6 +22,9 @@ private:
    bool m_isCrouch {}; // is node to be created as crouch ?
    bool m_isAnalyzing {}; // we're in analyzing ?
    bool m_isAnalyzed {}; // current node is analyzed
+   bool m_exploring {}; // opt-in physical traversal analysis
+   bool m_repopulating {};
+   int m_repopulateSeed { -2 }, m_pausedWorkers {};
    bool m_expandedNodes[kMaxNodes] {}; // all nodes expanded ?
    bool m_optimizedNodes[kMaxNodes] {}; // all nodes expanded ?
    Array <GraphHazardBounds> m_hazards {};
@@ -29,14 +32,17 @@ private:
 public:
    // start analysis process
    void start ();
+   bool repopulate (int seed);
+   bool isRepopulating () const { return m_isAnalyzing && m_repopulating; }
 
    // update analysis process
    void update ();
 
    // suspend analysis
-   void suspend ();
+   void suspend (bool restoreWorkers = true);
 
 private:
+   void resumeWorkers ();
    // flood with nodes
    void flood (const Vector &pos, const Vector &next, float range);
 
@@ -69,6 +75,8 @@ public:
    bool isAnalyzing () const {
       return m_isAnalyzing;
    }
+
+   bool isExploring () const { return m_isAnalyzing && m_exploring; }
 
    bool pathTouchesHazard (const Vector &from, const Vector &to) const;
 

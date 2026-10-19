@@ -6,6 +6,7 @@
 //
 
 #pragma once
+#include <graph_jump_recording.h>
 
 constexpr int kMaxNodes = 4096; // max nodes per graph
 constexpr int kMaxNodeLinks = 8; // max links for single node
@@ -30,7 +31,13 @@ CR_DECLARE_SCOPED_ENUM (NodeFlag,
 
 // defines for node connection flags field (16 bits are available)
 CR_DECLARE_SCOPED_ENUM_TYPE (PathFlag, uint16_t,
-   Jump = cr::bit (0) // must jump for this connection
+   Jump = cr::bit (0), // must jump for this connection
+   InputVerified = cr::bit (1), // physical analysis: never inject jump velocity
+   InputCrouch = cr::bit (2), // hold crouch while traversing this connection
+   InputSimulated = cr::bit (3), // prediction, not a physical traversal
+   InputLadder = cr::bit (4), // contact-based ladder movement, with grounded exits
+   InputAirDuck = cr::bit (5), // run/jump standing, then crouch in air
+   InputBreakable = cr::bit (6) // generated assuming a shootable obstruction is broken
 )
 
 // enum pathfind search type
@@ -165,6 +172,8 @@ private:
    bool m_isOnLadder {};
    bool m_endJumpPoint {};
    bool m_jumpLearnNode {};
+   int m_lastJumpLanding { kInvalidNodeIndex };
+   GraphJumpRecording m_manualJump {};
    bool m_hasChanged {};
    bool m_narrowChecked {};
    bool m_silenceMessages {};
@@ -223,7 +232,7 @@ public:
    bool checkNodes (bool teleportPlayer, bool onlyPaths = false);
    bool isVisited (int index);
 
-   bool saveGraphData ();
+   bool saveGraphData (bool preserveNodes = false);
    bool loadGraphData ();
    bool canDownload ();
    bool isAnalyzed () const;
@@ -249,6 +258,9 @@ public:
    void addBasic ();
    void setSearchIndex (int index);
    void startLearnJump ();
+   int lastJumpLanding () const { return m_lastJumpLanding; }
+   bool learningJump () const { return m_jumpLearnNode; }
+   void cancelLearnJump () { m_jumpLearnNode = m_endJumpPoint = false; }
    void setVisited (int index);
    void clearVisited ();
 
@@ -278,6 +290,7 @@ public:
    bool hasChanged () const {
       return m_hasChanged;
    }
+   void markChanged () { m_hasChanged = true; }
 
    bool hasEditFlag (int flag) const {
       return !!(m_editFlags & flag);

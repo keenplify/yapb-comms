@@ -17,6 +17,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(YAPB_SRC
     "src/analyze.cpp"
+    "src/explore.cpp"
     "src/botlib.cpp"
     "src/chatlib.cpp"
     "src/combat.cpp"
@@ -179,7 +180,7 @@ endif()
 # Standalone behavior tests do not require a running GoldSrc server.
 include(CTest)
 if(BUILD_TESTING AND NOT CMAKE_SYSTEM_NAME MATCHES "Emscripten")
-    foreach(test_name combat_behavior team_order bhop radio_comms view_smoothing lagging_bot score_reaction holding_utility map_callouts legacy_join graph_hazard)
+    foreach(test_name combat_behavior team_order bhop radio_comms view_smoothing lagging_bot score_reaction holding_utility map_callouts legacy_join graph_hazard graph_clearance graph_exploration virtual_player graph_jump_recording)
         add_executable(${test_name}_test tests/${test_name}.cpp)
         target_include_directories(${test_name}_test PRIVATE inc)
         # The fixtures use assert; retain them in Release builds too.

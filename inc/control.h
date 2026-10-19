@@ -109,6 +109,9 @@ private:
    int cmdNodeOff ();
    int cmdNodeAdd ();
    int cmdNodeAddBasic ();
+   int cmdNodeJump ();
+   int cmdNodeRepopulate ();
+   int cmdNodePrune ();
    int cmdNodeSave ();
    int cmdNodeLoad ();
    int cmdNodeErase ();

@@ -492,7 +492,9 @@ int BotControl::cmdNode () {
       "erase",
       "erase_training",
       "fileinfo",
-      "check"
+      "check",
+      "repopulate",
+      "prune"
    };
 
    // check if cmd is allowed on dedicated server
@@ -512,6 +514,11 @@ int BotControl::cmdNode () {
    }
 
    // should be moved to class?
+   if (analyzer.isAnalyzing () && arg <StringRef> (cmd) != "repopulate"
+      && arg <StringRef> (cmd) != "prune" && arg <StringRef> (cmd) != "help" && arg <StringRef> (cmd) != "fileinfo") {
+      msg ("Graph edits are paused during analysis. Use yb graph repopulate stop to stop incremental expansion.");
+      return BotCommandResult::Handled;
+   }
    static HashMap <String, BotCmd> commands {};
    static StringArray descriptions {};
 
@@ -532,6 +539,9 @@ int BotControl::cmdNode () {
       addGraphCmd ("menu", "menu [noarguments]", "Opens and displays bots graph editor.", &BotControl::cmdNodeMenu);
       addGraphCmd ("add", "add [noarguments]", "Opens and displays graph node add menu.", &BotControl::cmdNodeAdd);
       addGraphCmd ("addbasic", "menu [noarguments]", "Adds basic nodes such as player spawn points, goals and ladders.", &BotControl::cmdNodeAddBasic);
+      addGraphCmd ("jump", "jump [cancel]", "Record your next real jump and report its landing node.", &BotControl::cmdNodeJump);
+      addGraphCmd ("repopulate", "repopulate [last|nearest|index|all|stop]", "Expand an existing graph from a landing node without replacing manual routes. Spectators only.", &BotControl::cmdNodeRepopulate);
+      addGraphCmd ("prune", "prune [noarguments]", "Back up the graph and remove blocked walking links. Preserve nodes and special/manual jump routes. Spectators only.", &BotControl::cmdNodePrune);
       addGraphCmd ("save", "save [noarguments]", "Save graph file to disk.", &BotControl::cmdNodeSave);
       addGraphCmd ("load", "load [noarguments]", "Load graph file from disk.", &BotControl::cmdNodeLoad);
       addGraphCmd ("erase", "erase [iamsure]", "Erases the graph file from disk.", &BotControl::cmdNodeErase);
@@ -699,6 +709,50 @@ int BotControl::cmdNodeOff () {
       graph.clearEditFlag (GraphEdit::Auto);
       msg ("Graph editor has disabled auto add node mode.");
    }
+   return BotCommandResult::Handled;
+}
+
+int BotControl::cmdNodePrune () {
+   if (!arg <StringRef> (3).empty ()) return BotCommandResult::BadFormat;
+   analyzer.repopulate (-3);
+   return BotCommandResult::Handled;
+}
+
+int BotControl::cmdNodeJump () {
+   const auto option = arg <StringRef> (3);
+   if (option == "cancel") {
+      graph.cancelLearnJump ();
+      msg ("Jump recording cancelled.");
+   }
+   else if (option.empty ()) graph.startLearnJump ();
+   else return BotCommandResult::BadFormat;
+   return BotCommandResult::Handled;
+}
+
+int BotControl::cmdNodeRepopulate () {
+   const auto option = arg <StringRef> (3);
+   if (option == "stop") {
+      if (analyzer.isRepopulating ()) {
+         analyzer.suspend ();
+         msg ("Repopulate stopped. Manual graph was saved before expansion; partial additions remain in memory, unsaved.");
+      }
+      else msg ("No incremental expansion is running.");
+      return BotCommandResult::Handled;
+   }
+   int seed = kInvalidNodeIndex;
+   if (option == "all") seed = -1;
+   else if (option == "last" || (option.empty () && graph.exists (graph.lastJumpLanding ()))) seed = graph.lastJumpLanding ();
+   else if (option == "nearest" || option.empty ()) seed = graph.hasEditor () ? graph.getEditorNearest () : kInvalidNodeIndex;
+   else {
+      if (option.length () > 4) return BotCommandResult::BadFormat;
+      for (size_t i = 0; i < option.length (); ++i) if (option[i] < '0' || option[i] > '9') return BotCommandResult::BadFormat;
+      seed = option.as <int> ();
+   }
+   if (option != "all" && !graph.exists (seed)) {
+      msg ("Choose a landing node: yb graph repopulate <index>. Record a jump first to use last.");
+      return BotCommandResult::Handled;
+   }
+   analyzer.repopulate (seed);
    return BotCommandResult::Handled;
 }
 

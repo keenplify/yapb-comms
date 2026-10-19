@@ -227,6 +227,7 @@ public:
 class Bot final {
 public:
    friend class BotManager;
+   friend class GraphExplore;
 
 private:
    mutable Mutex m_pathFindLock {};
@@ -347,6 +348,7 @@ private:
    bool m_moveToGoal {}; // bot currently moving to goal??
    bool m_isStuck {}; // bot is stuck
    bool m_isStale {}; // bot is leaving server
+   bool m_graphExplorer {}; // dedicated input-only graph analysis client
    bool m_isReloading {}; // bot is reloading a gun
    bool m_forceRadio {}; // should bot use radio anyway?
    bool m_defendedBomb {}; // defend action issued
@@ -1026,6 +1028,7 @@ private:
 #include "planner.h"
 #include "storage.h"
 #include "analyze.h"
+#include "explore.h"
 #include "fakeping.h"
 
 // very global convars

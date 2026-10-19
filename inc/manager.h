@@ -38,6 +38,7 @@ struct TeamOrderAck {
 
 // manager class
 class BotManager final : public Singleton <BotManager> {
+   friend class GraphExplore;
 public:
    using ForEachBot = const Lambda <bool (Bot *)> &;
    using UniqueBot = UniquePtr <Bot>;
@@ -127,7 +128,7 @@ private:
    CountdownTimer m_holdQuotaManagementTimer {}; // prevent from running quota management for some time
 
 protected:
-   BotCreateResult create (StringRef name, int difficulty, int personality, int team, int skin);
+   BotCreateResult create (StringRef name, int difficulty, int personality, int team, int skin, bool graphExplorer = false);
 
 public:
    BotManager ();

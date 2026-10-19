@@ -229,7 +229,7 @@ void Game::levelShutdown () {
    graph.reset ();
 
    // suspend any analyzer tasks
-   analyzer.suspend ();
+   analyzer.suspend (false);
 
    // disable command handling
    ctrl.setDenyCommands (true);
@@ -1148,6 +1148,8 @@ void Game::applyGameModes () {
 }
 
 void Game::slowFrame () {
+   // Physical exploration has its own bounded coordinator and no tactical AI.
+   if (analyzer.isExploring ()) return;
    if (bots.isMatchCompleted ()) return;
    const auto nextUpdate = cr::clamp (75.0f * globals->frametime, 0.5f, 1.0f);
 

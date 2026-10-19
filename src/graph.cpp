@@ -6,6 +6,7 @@
 //
 
 #include <yapb.h>
+#include <graph_clearance.h>
 
 ConVar cv_graph_fixcamp ("graph_fixcamp", "0", "Specifies whether the bot should not 'fix' camp directions of camp waypoints when loading the old PWF format.");
 ConVar cv_graph_url ("graph_url", product.download.chars (), "Specifies the URL from which bots will be able to download the graph in case of a missing local one. Set to empty if no downloads are needed.", false, 0.0f, 0.0f);
@@ -15,6 +16,9 @@ ConVar cv_graph_draw_distance ("graph_draw_distance", "400", "Maximum distance t
 ConVar cv_graph_auto_collect_db ("graph_auto_collect_db", "1", "Allows bots to exchange your graph files with the graph database automatically.");
 
 void BotGraph::reset () {
+   m_lastJumpLanding = kInvalidNodeIndex;
+   m_lastJumpNode = kInvalidNodeIndex;
+   cancelLearnJump ();
    // this function initialize the graph structures..
 
    m_editFlags = 0;
@@ -628,7 +632,7 @@ void BotGraph::add (int type, const Vector &pos) {
       return;
    }
 
-   if (bots.hasBotsOnline ()) {
+   if (bots.hasBotsOnline () && !analyzer.isExploring ()) {
       bots.kickEveryone (true);
    }
    m_hasChanged = true;
@@ -664,16 +668,15 @@ void BotGraph::add (int type, const Vector &pos) {
       return;
 
    case NodeAddFlag::JumpStart:
-      index = getEditorNearest (25.0f);
+      index = getEditorNearest (10.0f);
 
       if (index != kInvalidNodeIndex && m_paths[index].number >= 0) {
          const float distanceSq = m_editor->v.origin.distanceSq (m_paths[index].origin);
 
-         if (distanceSq < cr::sqrf (25.0f)) {
+         if (distanceSq < cr::sqrf (10.0f)) {
             addNewNode = false;
 
             path = &m_paths[index];
-            path->origin = (path->origin + m_learnPosition) * 0.5f;
          }
       }
       else {
@@ -682,24 +685,15 @@ void BotGraph::add (int type, const Vector &pos) {
       break;
 
    case NodeAddFlag::JumpEnd:
-      index = getEditorNearest (25.0f);
+      index = getEditorNearest (10.0f);
 
       if (index != kInvalidNodeIndex && m_paths[index].number >= 0) {
          const float distanceSq = m_editor->v.origin.distanceSq (m_paths[index].origin);
 
-         if (distanceSq < cr::sqrf (25.0f)) {
+         if (distanceSq < cr::sqrf (10.0f)) {
             addNewNode = false;
             path = &m_paths[index];
 
-            int connectionFlags = 0;
-
-            for (const auto &link : path->links) {
-               connectionFlags += link.flags;
-            }
-
-            if (connectionFlags == 0) {
-               path->origin = (path->origin + m_editor->v.origin) * 0.5f;
-            }
          }
       }
       break;
@@ -707,9 +701,13 @@ void BotGraph::add (int type, const Vector &pos) {
 
    if (addNewNode) {
       if (analyzer.isAnalyzing ()) {
-         for (const auto &cp : m_paths) {
-            if (newOrigin.distanceSq (cp.origin) < cr::sqrf (24.0f)) {
-               return;
+         // Exploration applies stance/surface-aware spacing itself. A blanket
+         // 24-unit rejection drops necessary crouch and ladder transitions.
+         if (!analyzer.isExploring ()) {
+            for (const auto &cp : m_paths) {
+               if (newOrigin.distanceSq (cp.origin) < cr::sqrf (24.0f)) {
+                  return;
+               }
             }
          }
       }
@@ -771,6 +769,21 @@ void BotGraph::add (int type, const Vector &pos) {
       m_lastJumpNode = index;
    }
    else if (type == NodeAddFlag::JumpEnd) {
+      if (!exists (m_lastJumpNode) || m_lastJumpNode == index) return;
+      bool space = false;
+      int replace = -1, farthest = -1;
+      auto &links = m_paths[m_lastJumpNode].links;
+      for (int n = 0; n < kMaxNodeLinks; ++n) {
+         const auto &link = links[n];
+         space |= link.index == kInvalidNodeIndex || link.index == index;
+         if ((link.flags & PathFlag::InputSimulated) && !(link.flags & (PathFlag::Jump | PathFlag::InputLadder))
+            && link.distance > farthest) { replace = n; farthest = link.distance; }
+      }
+      if (!space) {
+         if (replace < 0) { msg ("Jump source has eight protected links. Free an outgoing link and record again."); return; }
+         msg ("Replacing generated walk link %d -> %d to make room for the manual jump.", m_lastJumpNode, links[replace].index);
+         links[replace].index = kInvalidNodeIndex;
+      }
       const float distance = m_paths[m_lastJumpNode].origin.distance (m_editor->v.origin);
       addPath (m_lastJumpNode, index, distance);
 
@@ -782,7 +795,10 @@ void BotGraph::add (int type, const Vector &pos) {
             break;
          }
       }
+      if (m_editor->v.flags & FL_DUCKING) m_paths[index].flags |= NodeFlag::Crouch;
       calculatePathRadius (index);
+      m_lastJumpLanding = index;
+      msg ("Jump recorded: %d -> %d. Landing seed: %d.", m_lastJumpNode, index, index);
       return;
    }
 
@@ -835,6 +851,13 @@ void BotGraph::add (int type, const Vector &pos) {
       break;
    }
 
+   // Exploration owns directed links. Never invent connections between nearby
+   // candidates, or invoke the normal expensive radius/link generation here.
+   if (analyzer.isExploring ()) {
+      path->radius = 0.0f;
+      return;
+   }
+
    // ladder nodes need careful connections
    if (path->flags & NodeFlag::Ladder) {
       float nearestDistance = kInfiniteDistance;
@@ -852,6 +875,13 @@ void BotGraph::add (int type, const Vector &pos) {
          if (calc.flags & NodeFlag::Ladder) {
             // check if the node is reachable from the new one
             game.testLine (newOrigin, calc.origin, TraceIgnore::Monsters, m_editor, &tr);
+
+            if (analyzer.isAnalyzing ()) {
+               game.testHull (newOrigin, calc.origin, TraceIgnore::Monsters, head_hull, m_editor, &tr);
+               if (!graphTraceIsClear (tr)) {
+                  continue;
+               }
+            }
 
             if (cr::fequal (tr.flFraction, 1.0f)
                && cr::abs (newOrigin.x - calc.origin.x) < 64.0f
@@ -880,27 +910,21 @@ void BotGraph::add (int type, const Vector &pos) {
       }
 
       if (exists (destIndex)) {
-         const float distance = newOrigin.distance2d (m_paths[destIndex].origin);
-
-         if (analyzer.isAnalyzing ()) {
-            addPath (index, destIndex, distance);
-            addPath (destIndex, index, distance);
+         // Generated ladder links need the same clearance as other links.
+         if (isNodeReacheable (newOrigin, m_paths[destIndex].origin)) {
+            addPath (index, destIndex, newOrigin.distance (m_paths[destIndex].origin));
          }
-         else {
-            // check if the node is reachable from the new one (one-way)
-            if (isNodeReacheable (newOrigin, m_paths[destIndex].origin)) {
-               addPath (index, destIndex, newOrigin.distance (m_paths[destIndex].origin));
-            }
 
-            // check if the new one is reachable from the node (other way)
-            if (isNodeReacheable (m_paths[destIndex].origin, newOrigin)) {
-               addPath (destIndex, index, newOrigin.distance (m_paths[destIndex].origin));
-            }
+         if (isNodeReacheable (m_paths[destIndex].origin, newOrigin)) {
+            addPath (destIndex, index, newOrigin.distance (m_paths[destIndex].origin));
          }
       }
    }
    else {
       // calculate all the paths to this new node
+      int incoming = kInvalidNodeIndex, incomingSlot = -1;
+      float incomingDistance = kInfiniteDistance;
+      bool connectedIncoming = false;
       for (const auto &calc : m_paths) {
          if (calc.number == index) {
             continue; // skip the node that was just added
@@ -909,13 +933,35 @@ void BotGraph::add (int type, const Vector &pos) {
 
          // check if the node is reachable from the new one (one-way)
          if (isNodeReacheable (newOrigin, calc.origin)) {
-            addPath (index, calc.number, distance);
+            int count = 0;
+            for (const auto &link : path->links) count += link.index != kInvalidNodeIndex;
+            if (type != NodeAddFlag::JumpStart || count < kMaxNodeLinks - 1) addPath (index, calc.number, distance);
          }
 
          // check if the new one is reachable from the node (other way)
          if (isNodeReacheable (calc.origin, newOrigin)) {
-            addPath (calc.number, index, distance);
+            bool room = false;
+            int slot = -1, farthest = -1;
+            for (int n = 0; n < kMaxNodeLinks; ++n) {
+               const auto &link = calc.links[n];
+               room |= link.index == kInvalidNodeIndex || link.index == index;
+               if ((link.flags & PathFlag::InputSimulated) && !(link.flags & (PathFlag::Jump | PathFlag::InputLadder))
+                  && link.distance > farthest) { slot = n; farthest = link.distance; }
+            }
+            if (type != NodeAddFlag::JumpStart || room) {
+               addPath (calc.number, index, distance);
+               connectedIncoming = true;
+            }
+            else if (slot >= 0 && distance < incomingDistance) {
+               incoming = calc.number; incomingSlot = slot; incomingDistance = distance;
+            }
          }
+      }
+      // A new takeoff needs an approach route, but may never evict an old
+      // manual jump. Replace at most one generated walk if all approaches fill.
+      if (type == NodeAddFlag::JumpStart && !connectedIncoming && exists (incoming)) {
+         m_paths[incoming].links[incomingSlot].index = kInvalidNodeIndex;
+         addPath (incoming, index, incomingDistance);
       }
 
       if (!analyzer.isAnalyzing ()) {
@@ -931,6 +977,7 @@ void BotGraph::add (int type, const Vector &pos) {
 }
 
 void BotGraph::erase (int target) {
+   m_lastJumpLanding = kInvalidNodeIndex;
    m_hasChanged = true;
 
    if (m_paths.empty ()) {
@@ -1862,7 +1909,7 @@ bool BotGraph::canDownload () {
    return !cv_graph_url.as <StringRef> ().empty ();
 }
 
-bool BotGraph::saveGraphData () {
+bool BotGraph::saveGraphData (bool preserveNodes) {
    auto options = m_info.header.options | StorageOption::Graph | StorageOption::Exten;
    String editorName {};
 
@@ -1909,7 +1956,7 @@ bool BotGraph::saveGraphData () {
    m_narrowChecked = false;
    m_lightChecked = false;
 
-   initNarrowPlaces ();
+   if (!preserveNodes) initNarrowPlaces ();
 
    return bstor.save <Path> (m_paths, &exten, options);
 }
@@ -1989,8 +2036,26 @@ bool BotGraph::isNodeReacheableEx (const Vector &src, const Vector &destination,
       return false; // don't add path nodes through func_illusionaries
    }
 
+   if (analyzer.isAnalyzing () && !graphTraceIsClear (tr)) {
+      // A visible center line is insufficient: the bot's width must fit too.
+      // Doors remain traversable, but ignoring one must not hide a wall behind
+      // it. Retrace the whole segment rather than starting on its solid face.
+      if (tr.fStartSolid || tr.fAllSolid || !game.isDoorEntity (tr.pHit)) {
+         return false;
+      }
+      auto door = tr.pHit;
+      game.testHull (src, destination, TraceIgnore::Monsters, head_hull, door, &tr);
+      if (!graphTraceIsClear (tr)) {
+         return false;
+      }
+   }
+
    // check if this node is "visible"...
    game.testLine (src, destination, TraceIgnore::Monsters, m_editor, &tr);
+
+   if (analyzer.isAnalyzing () && (tr.fStartSolid || tr.fAllSolid)) {
+      return false;
+   }
 
    const bool isDoor = game.isDoorEntity (tr.pHit);
 
@@ -2087,8 +2152,11 @@ void BotGraph::frame () {
       if (!m_endJumpPoint) {
          if (m_editor->v.button & IN_JUMP) {
             add (NodeAddFlag::JumpStart);
+            if (!exists (m_lastJumpNode)) { cancelLearnJump (); return; }
 
             m_timeJumpStarted = game.time ();
+            m_manualJump = {};
+            m_manualJump.started = game.time ();
             m_endJumpPoint = true;
          }
          else {
@@ -2096,11 +2164,14 @@ void BotGraph::frame () {
             m_learnPosition = m_editor->v.origin;
          }
       }
-      else if (((m_editor->v.flags & FL_ONGROUND) || m_editor->v.movetype == MOVETYPE_FLY) && m_timeJumpStarted + 0.1f < game.time ()) {
-         add (NodeAddFlag::JumpEnd);
-
-         m_jumpLearnNode = false;
-         m_endJumpPoint = false;
+      else {
+         const auto result = m_manualJump.observe (game.time (), game.isAliveEntity (m_editor),
+            (m_editor->v.flags & FL_ONGROUND) != 0, m_editor->v.movetype == MOVETYPE_WALK);
+         if (result == GraphJumpResult::Landed) add (NodeAddFlag::JumpEnd);
+         if (result != GraphJumpResult::Pending) {
+            cancelLearnJump ();
+            if (result == GraphJumpResult::Rejected) msg ("Jump not recorded: no stable live landing.");
+         }
       }
    }
 
@@ -2786,7 +2857,20 @@ void BotGraph::addBasic () {
 }
 
 void BotGraph::startLearnJump () {
+   if (analyzer.isAnalyzing () || game.isNullEntity (m_editor) || !game.isAliveEntity (m_editor)
+      || hasEditFlag (GraphEdit::Noclip) || m_editor->v.movetype != MOVETYPE_WALK) {
+      msg ("Record jumps alive with noclip off, outside analysis.");
+      return;
+   }
+   m_learnPosition = m_editor->v.origin;
+   m_learnVelocity = m_editor->v.velocity;
+   m_endJumpPoint = false;
+   m_lastJumpLanding = kInvalidNodeIndex;
+   m_lastJumpNode = kInvalidNodeIndex;
    m_jumpLearnNode = true;
+   setEditFlag (GraphEdit::On);
+   clearEditFlag (GraphEdit::Auto);
+   msg ("Jump recording armed. Run, jump, then land normally. Repeat for each jump.");
 }
 
 void BotGraph::setSearchIndex (int index) {

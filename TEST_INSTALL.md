@@ -1,5 +1,31 @@
 # YaPB team comms test build
 
+Virtual player generation is available with `yb_graph_analyze_swarm 1` and
+`yb_graph_analyze_virtual 1`. It uses no client bots and predicts standard
+dry-ground movement with engine hull sweeps. These routes are marked as
+simulated; custom parkour movement still needs in-game validation. The Windows
+test launcher is `Start YaPB Virtual Graph.cmd` in the Half-Life installation.
+
+The experimental CPU/RAM-sized physical analyzer is opt-in and requires a dedicated
+analysis server. See `docs/graph-exploration.md` for settings, resource limits,
+cancellation and current parkour limitations. It tests basic isolated movement;
+strafe-jump searches and momentum chains are not implemented yet.
+
+Automatic graph generation now rejects hull traces that start in solid or do
+not reach their destination, checks final node clearance after floor placement,
+and validates smoothing positions before replacing nodes. Generated ladder links
+also require clearance. Node placement checks the full standing hull, falling
+back to a lowered crouching hull only when that volume fits. Smoothing preserves
+the stance and checks the corresponding full hull. Include a ceiling overhang
+beside the node center line and openings too low even for crouching in testing.
+This affects newly analyzed graphs; existing graph files
+are not repaired automatically. On a disposable server, regenerate the affected
+map's graph and inspect both sides of thin walls, narrow corners, ladders, low
+ceilings, stairs and doorways. Confirm bots go around solid walls while normal
+passages remain connected. Check smoothing both enabled and disabled with
+`yb_graph_analyze_optimize_nodes_on_finish`. A source change or standalone test
+does not establish map-specific engine collision behavior; verify it in-game.
+
 Enemy count/location reports are team-only and visibly labeled as team chat.
 YaPB and the AMXX bridge both suppress reports while either party is firing or
 the reporting bot recently took damage. Delayed sighting radio/text is checked

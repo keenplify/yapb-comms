@@ -25,18 +25,18 @@ bool graphSegmentTouchesHazard (const GraphHazardBounds &hazard, const Point &fr
          continue;
       }
 
-      float near = (mins[axis] - start[axis]) / delta;
-      float far = (maxs[axis] - start[axis]) / delta;
-      if (near > far) {
-         const float swap = near;
-         near = far;
-         far = swap;
+      float nearFraction = (mins[axis] - start[axis]) / delta;
+      float farFraction = (maxs[axis] - start[axis]) / delta;
+      if (nearFraction > farFraction) {
+         const float swap = nearFraction;
+         nearFraction = farFraction;
+         farFraction = swap;
       }
-      if (near > enter) {
-         enter = near;
+      if (nearFraction > enter) {
+         enter = nearFraction;
       }
-      if (far < leave) {
-         leave = far;
+      if (farFraction < leave) {
+         leave = farFraction;
       }
       if (enter > leave) {
          return false;

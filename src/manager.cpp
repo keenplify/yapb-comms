@@ -234,12 +234,17 @@ void BotManager::forEach (ForEachBot handler) {
    }
 }
 
-BotCreateResult BotManager::create (StringRef name, int difficulty, int personality, int team, int skin) {
+BotCreateResult BotManager::create (StringRef name, int difficulty, int personality, int team, int skin, bool graphExplorer) {
    // this function completely prepares bot entity (edict) for creation, creates team, difficulty, sets named etc, and
    // then sends result to bot constructor
 
    edict_t *bot = nullptr;
    String resultName {};
+
+   // Only the active analysis coordinator may bypass finalized graph tables.
+   if (graphExplorer && (!analyzer.isExploring () || !explorer.active ())) {
+      return BotCreateResult::GraphError;
+   }
 
    // do not allow create bots when there is no graph
    if (!graph.length ()) {
@@ -248,7 +253,7 @@ BotCreateResult BotManager::create (StringRef name, int difficulty, int personal
    }
 
    // don't allow creating bots with changed graph (distance tables are messed up)
-   else if (graph.hasChanged ()) {
+   else if (graph.hasChanged () && !graphExplorer) {
       ctrl.msg ("Graph has been changed. Load graph again...");
       return BotCreateResult::GraphError;
    }
@@ -331,6 +336,7 @@ BotCreateResult BotManager::create (StringRef name, int difficulty, int personal
       return BotCreateResult::MaxPlayersReached;
    }
    auto object = cr::makeUnique <Bot> (bot, difficulty, personality, team, skin);
+   object->m_graphExplorer = graphExplorer;
    const auto index = object->index ();
 
    // seed random number generator
@@ -385,6 +391,12 @@ Bot *BotManager::findAliveBot () {
 void BotManager::frame () {
    // this function calls showframe function for all available at call moment bots
 
+   if (analyzer.isExploring ()) {
+      for (const auto &bot : m_bots) {
+         if (bot->m_graphExplorer) bot->frame ();
+      }
+      return;
+   }
    maintainCompetitiveLifecycle ();
    int teamSpeakers[kGameTeamNum] {};
    int freeForAllSpeakers = 0;
@@ -579,7 +591,7 @@ void BotManager::maintainQuota () {
    // this function keeps number of bots up to date, and don't allow to maintain bot creation
    // while creation process in process.
 
-   if (!m_holdQuotaManagementTimer.elapsed ()) {
+   if (analyzer.isExploring () || !m_holdQuotaManagementTimer.elapsed ()) {
       return;
    }
 
