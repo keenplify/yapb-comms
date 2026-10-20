@@ -384,6 +384,7 @@ private:
    edict_t *m_breakableEntity {}; // pointer to breakable entity
    edict_t *m_lastBreakable {}; // last acquired breakable
    edict_t *m_targetEntity {}; // the entity that the bot is trying to reach
+   float m_nextVipEscortCheck {}; // throttle human VIP search on assassination maps
    edict_t *m_avoidGrenade {}; // pointer to grenade entity to avoid
    edict_t *m_hindrance {}; // the hindrance
    edict_t *m_hearedEnemy {}; // the heared enemy

@@ -1102,6 +1102,8 @@ void Bot::followUser_ () {
       m_reloadState = Reload::Primary;
    }
 
+   const bool escortingVip = m_team == Team::CT && game.mapIs (MapFlags::Assassination)
+      && game.isPlayerVIP (m_targetEntity);
    if (m_targetEntity->v.origin.distanceSq (pev->origin) > cr::sqrf (130.0f)) {
       m_followWaitTime = 0.0f;
    }
@@ -1112,7 +1114,7 @@ void Bot::followUser_ () {
          m_followWaitTime = game.time ();
       }
       else {
-         if (m_followWaitTime + 3.0f < game.time ()) {
+         if (!escortingVip && m_followWaitTime + 3.0f < game.time ()) {
             // stop following if we have been waiting too long
             m_targetEntity = nullptr;
 

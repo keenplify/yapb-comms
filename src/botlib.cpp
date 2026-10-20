@@ -3605,6 +3605,32 @@ void Bot::logic () {
    }
    executeChatterFrameEvents ();
 
+   // CT bots escort a human VIP instead of choosing a random player to follow.
+   // Combat and urgent tasks keep their normal priority; resume escort afterward.
+   if (m_team == Team::CT && game.mapIs (MapFlags::Assassination)
+      && m_nextVipEscortCheck <= game.time ()) {
+      m_nextVipEscortCheck = game.time () + 0.5f;
+      const auto task = getCurrentTaskId ();
+      if ((task == Task::Normal || task == Task::FollowUser)
+         && game.isNullEntity (m_enemy) && !(m_states & Sense::SeeingEnemy)) {
+         for (const auto &client : util.getClients ()) {
+            if (!(client.flags & ClientFlags::Used) || !(client.flags & ClientFlags::Alive)
+               || client.team != m_team || game.isFakeClientEntity (client.ent)
+               || !game.isPlayerVIP (client.ent)) {
+               continue;
+            }
+            if (m_targetEntity != client.ent) {
+               m_targetEntity = client.ent;
+               clearSearchNodes ();
+            }
+            if (task == Task::Normal) {
+               startTask (Task::FollowUser, TaskPri::FollowUser, kInvalidNodeIndex, 0.0f, true);
+            }
+            break;
+         }
+      }
+   }
+
    m_checkTerrain = true;
    m_moveToGoal = true;
    m_wantsToFire = false;
