@@ -151,3 +151,13 @@ CS 1.6 BSP size were verified. Some requested intents are recognized but
 reported unavailable; see `TEAM_COMMS.md` for the exact list. The optional
 sidecar calls the configured model provider when it is running and has a
 valid key.
+# Legacy join guard (2026-10-15)
+
+The Legacy join path now clears pending team/class menus once a bot is already
+alive, solid, on a combat team, and outside observer mode. This prevents replaying
+join menus after external roster enforcement completes the join. The 32-bit
+Linux build and all ten CTest cases passed, including `legacy_join` coverage.
+The built module was installed into the local backend's legacy server template.
+Native 1.3 roster, MR12 side-swap and MR3 checks passed with it. A reported bot
+teleport was not reproduced by the bounded physics probe; do not treat this
+join-race fix as proof that every position issue is resolved.

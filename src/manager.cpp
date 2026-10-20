@@ -7,6 +7,7 @@
 
 #include <yapb.h>
 #include <map_callouts.h>
+#include <legacy_join.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -3096,6 +3097,12 @@ void Bot::updateTeamJoin () {
 
    // cs prior beta 7.0 uses hud-based motd, so press fire once
    if (game.is (GameFlags::Legacy)) {
+      if (legacyJoinComplete (botTeam == Team::Terrorist || botTeam == Team::CT,
+         game.isAliveEntity (ent ()), pev->solid == SOLID_SLIDEBOX, pev->iuser1 != 0)) {
+         m_notStarted = false;
+         m_startAction = BotMsg::None;
+         return;
+      }
       pev->button |= IN_ATTACK;
    }
 
