@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <graph_hazard.h>
+
 // next code is based on cs-ebot implementation, devised by EfeDursun125
 class GraphAnalyze : public Singleton <GraphAnalyze> {
 public:
@@ -22,6 +24,7 @@ private:
    bool m_isAnalyzed {}; // current node is analyzed
    bool m_expandedNodes[kMaxNodes] {}; // all nodes expanded ?
    bool m_optimizedNodes[kMaxNodes] {}; // all nodes expanded ?
+   Array <GraphHazardBounds> m_hazards {};
 
 public:
    // start analysis process
@@ -66,6 +69,8 @@ public:
    bool isAnalyzing () const {
       return m_isAnalyzing;
    }
+
+   bool pathTouchesHazard (const Vector &from, const Vector &to) const;
 
    // current graph is analyzed graph ?
    bool isAnalyzed () const {

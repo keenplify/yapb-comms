@@ -25,6 +25,32 @@ void GraphAnalyze::start () {
    if (cv_graph_analyze_auto_start) {
       m_updateInterval = game.time () + 3.0f;
       m_basicsCreated = false;
+      m_hazards.clear ();
+      edict_t *firstHurt = nullptr;
+
+      game.searchEntities ("classname", "trigger_hurt", [&] (edict_t *ent) {
+         // Some engine builds wrap FindEntityByString back to the first match.
+         // Stop after one pass so analysis cannot grow this list indefinitely.
+         if (ent == firstHurt) {
+            return EntitySearchResult::Break;
+         }
+         if (!firstHurt) {
+            firstHurt = ent;
+         }
+         // Ignore non-damaging/empty helper entities; map brush triggers have
+         // usable world bounds even though movement traces pass through them.
+         if (ent->v.dmg > 0.0f && ent->v.solid == SOLID_TRIGGER
+            && ent->v.absmax.x > ent->v.absmin.x
+            && ent->v.absmax.y > ent->v.absmin.y
+            && ent->v.absmax.z > ent->v.absmin.z) {
+            m_hazards.emplace (GraphHazardBounds {
+               ent->v.absmin.x, ent->v.absmin.y, ent->v.absmin.z,
+               ent->v.absmax.x, ent->v.absmax.y, ent->v.absmax.z
+            });
+         }
+         return EntitySearchResult::Continue;
+      });
+      ctrl.msg ("Map analysis will avoid %d damage volumes.", m_hazards.length ());
 
       // set as we're analyzing
       m_isAnalyzing = true;
@@ -134,6 +160,16 @@ void GraphAnalyze::suspend () {
    m_isAnalyzing = false;
    m_isAnalyzed = false;
    m_basicsCreated = false;
+   m_hazards.clear ();
+}
+
+bool GraphAnalyze::pathTouchesHazard (const Vector &from, const Vector &to) const {
+   for (const auto &hazard : m_hazards) {
+      if (graphSegmentTouchesHazard (hazard, from, to)) {
+         return true;
+      }
+   }
+   return false;
 }
 
 void GraphAnalyze::finish () {
@@ -215,6 +251,10 @@ void GraphAnalyze::optimize () {
       // we're have max out node links
       if (indexes.length () >= kMaxNodeLinks) {
          const Vector &pos = smooth (indexes);
+
+         if (pathTouchesHazard (pos, pos)) {
+            continue;
+         }
 
          for (const auto &index : indexes) {
             graph.erase (index);

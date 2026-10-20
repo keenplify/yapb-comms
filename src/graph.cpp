@@ -624,6 +624,10 @@ void BotGraph::add (int type, const Vector &pos) {
       newOrigin = m_editor->v.origin;
    }
 
+   if (analyzer.isAnalyzing () && analyzer.pathTouchesHazard (newOrigin, newOrigin)) {
+      return;
+   }
+
    if (bots.hasBotsOnline ()) {
       bots.kickEveryone (true);
    }
@@ -1962,6 +1966,10 @@ float BotGraph::calculateTravelTime (float maxSpeed, const Vector &src, const Ve
 
 bool BotGraph::isNodeReacheableEx (const Vector &src, const Vector &destination, const float maxHeight) const {
    TraceResult tr {};
+
+   if (analyzer.isAnalyzing () && analyzer.pathTouchesHazard (src, destination)) {
+      return false;
+   }
 
    float distanceSq = destination.distanceSq (src);
 
