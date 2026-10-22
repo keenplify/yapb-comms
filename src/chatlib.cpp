@@ -9,6 +9,126 @@
 
 ConVar cv_chat ("chat", "1", "Enables or disables bot chat functionality.");
 ConVar cv_chat_percent ("chat_percent", "30", "Bot's chance to send random dead chat when killed.", true, 0.0f, 100.0f);
+ConVar cv_chat_llm_port ("chat_llm_port", "0", "Local LLM bridge TCP port. 0 disables LLM chat.", true, 0.0f, 65535.0f);
+
+static String escapeChatJson (StringRef value) {
+   String escaped {};
+
+   for (size_t i = 0; i < value.length () && i < 240; ++i) {
+      const auto c = value.chars ()[i];
+
+      if (c == '"' || c == '\\') {
+         escaped.appendf ("\\%c", c);
+      }
+      else if (static_cast <unsigned char> (c) < 32) {
+         escaped.append (" ");
+      }
+      else {
+         escaped.appendf ("%c", c);
+      }
+   }
+   return escaped;
+}
+
+static String requestLocalChat (StringRef body, int port) {
+#if defined(CR_WINDOWS)
+   WSADATA wsa {};
+   if (WSAStartup (MAKEWORD (2, 2), &wsa) != 0) {
+      return {};
+   }
+   const SOCKET socket = ::socket (AF_INET, SOCK_STREAM, IPPROTO_TCP);
+   if (socket == INVALID_SOCKET) {
+      WSACleanup ();
+      return {};
+   }
+#else
+   const int socket = ::socket (AF_INET, SOCK_STREAM, IPPROTO_TCP);
+   if (socket < 0) {
+      return {};
+   }
+#endif
+   auto closeSocket = [&] () {
+#if defined(CR_WINDOWS)
+      closesocket (socket);
+      WSACleanup ();
+#else
+      close (socket);
+#endif
+   };
+   sockaddr_in address {};
+   address.sin_family = AF_INET;
+   address.sin_port = htons (static_cast <uint16_t> (port));
+   address.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+
+#if defined(CR_WINDOWS)
+   DWORD timeout = 6000;
+#else
+   timeval timeout { 6, 0 };
+#endif
+   setsockopt (socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast <const char *> (&timeout), sizeof (timeout));
+   setsockopt (socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast <const char *> (&timeout), sizeof (timeout));
+
+   if (::connect (socket, reinterpret_cast <sockaddr *> (&address), sizeof (address)) != 0) {
+      closeSocket ();
+      return {};
+   }
+   const String request = strings.format (
+      "POST /reply HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: %u\r\nConnection: close\r\n\r\n%s",
+      static_cast <unsigned> (body.length ()), body.chars ());
+
+   size_t sent = 0;
+
+   while (sent < request.length ()) {
+#if defined(CR_WINDOWS)
+      const int flags = 0;
+#else
+      const int flags = MSG_NOSIGNAL;
+#endif
+      const int amount = ::send (socket, request.chars () + sent, static_cast <int> (request.length () - sent), flags);
+
+      if (amount <= 0) {
+         closeSocket ();
+         return {};
+      }
+      sent += static_cast <size_t> (amount);
+   }
+   String response {};
+   char buffer[512] {};
+
+   while (response.length () < 4096) {
+      const int amount = ::recv (socket, buffer, sizeof (buffer), 0);
+
+      if (amount <= 0) {
+         break;
+      }
+      response.append (String (buffer, static_cast <size_t> (amount)));
+   }
+   closeSocket ();
+   if (!response.startsWith ("HTTP/1.1 200")) {
+      return {};
+   }
+   const auto bodyStart = response.find ("\r\n\r\n");
+
+   if (bodyStart == String::InvalidIndex) {
+      return {};
+   }
+   const String raw = response.substr (bodyStart + 4, 160);
+   String safe {};
+
+   for (size_t i = 0; i < raw.length (); ++i) {
+      const auto c = raw[i];
+
+      // A reply is inserted into a game console command: reject delimiters.
+      if (c == '"' || c == '\\' || c == ';' || c == '%' || static_cast <unsigned char> (c) < 32) {
+         safe.append (" ");
+      }
+      else {
+         safe.appendf ("%c", c);
+      }
+   }
+   safe.trim ();
+   return safe;
+}
 
 BotChatManager::BotChatManager () {
    m_clanTags = {
@@ -19,6 +139,234 @@ BotChatManager::BotChatManager () {
       { "[", "]" }, { "{", "}" }, { "<", "[" }, { ">", "<" }, { ")", "(" },
       { "-", "-" }, { "|", "|" }, { "=", "=" }, { "+", "+" }, { "(", ")" },
    };
+}
+
+bool BotChatManager::hasHumanOnTeam (int team) const {
+   for (const auto &client : util.getClients ()) {
+      if ((client.flags & ClientFlags::Used) && client.team == team
+         && client.ent && !game.isFakeClientEntity (client.ent)) {
+         return true;
+      }
+   }
+   return false;
+}
+
+void BotChatManager::beginRound () {
+   ++m_roundNumber;
+   for (auto &kills : m_roundKills) {
+      kills = 0;
+   }
+   m_lastKiller = 0;
+   m_lastVictim = 0;
+   m_recentEvents.clear ();
+   for (auto &count : m_startTeamPlayers) {
+      count = 0;
+   }
+   for (const auto &client : util.getClients ()) {
+      if ((client.flags & ClientFlags::Used) && client.team >= 0 && client.team < kGameTeamNum) {
+         ++m_startTeamPlayers[client.team];
+      }
+   }
+}
+
+void BotChatManager::recordEvent (StringRef event) {
+   if (event.empty ()) {
+      return;
+   }
+   if (m_recentEvents.length () > 180) {
+      m_recentEvents.clear ();
+   }
+   if (!m_recentEvents.empty ()) {
+      m_recentEvents.append ("|");
+   }
+   m_recentEvents.append (event);
+}
+
+void BotChatManager::recordDeath (edict_t *killer, edict_t *victim) {
+   const int killerIndex = game.indexOfPlayer (killer);
+   const int victimIndex = game.indexOfPlayer (victim);
+
+   if (killerIndex < 1 || killerIndex > kGameMaxPlayers || victimIndex < 1 || victimIndex > kGameMaxPlayers) {
+      return;
+   }
+   m_killStreak[victimIndex] = 0;
+   m_lastKiller = killerIndex;
+   m_lastVictim = victimIndex;
+
+   if (game.getRealPlayerTeam (killer) == game.getRealPlayerTeam (victim)) {
+      recordEvent (strings.format ("teamkill:%s>%s", killer->v.netname.chars (), victim->v.netname.chars ()));
+      return;
+   }
+   ++m_roundKills[killerIndex];
+   ++m_killStreak[killerIndex];
+   recordEvent (strings.format ("kill:%s>%s,k:%d,streak:%d",
+      killer->v.netname.chars (), victim->v.netname.chars (), m_roundKills[killerIndex], m_killStreak[killerIndex]));
+}
+
+void BotChatManager::recordRoundWin (int team) {
+   if (game.is (GameFlags::CSDM | GameFlags::FreeForAll) || team < 0 || team >= kGameTeamNum) {
+      return;
+   }
+   recordEvent (strings.format ("round_winner:%s", team == Team::CT ? "CT" : "T"));
+   const int enemyTeam = team == Team::CT ? Team::Terrorist : Team::CT;
+   const int enemyCount = m_startTeamPlayers[enemyTeam];
+
+   if (enemyCount < 2) {
+      return;
+   }
+   for (int index = 1; index <= kGameMaxPlayers; ++index) {
+      if (m_roundKills[index] != enemyCount) {
+         continue;
+      }
+      auto player = game.entityOfIndex (index);
+
+      if (!game.isNullEntity (player) && game.getRealPlayerTeam (player) == team) {
+         recordEvent (strings.format ("ace:%s", player->v.netname.chars ()));
+         return;
+      }
+   }
+}
+
+String BotChatManager::recentContext () const {
+   String context = strings.format ("round:%d", m_roundNumber);
+   int alive[kGameTeamNum] {};
+
+   for (const auto &client : util.getClients ()) {
+      if ((client.flags & ClientFlags::Used) && (client.flags & ClientFlags::Alive)
+         && client.team >= 0 && client.team < kGameTeamNum) {
+         ++alive[client.team];
+      }
+   }
+   context.appendf (";alive:T%d,CT%d", alive[Team::Terrorist], alive[Team::CT]);
+
+   if (gameState.isBombPlanted ()) {
+      context.append (";bomb:planted");
+   }
+
+   if (!m_recentEvents.empty ()) {
+      context.appendf (";%s", m_recentEvents.chars ());
+   }
+   for (int i = 0; i < 4; ++i) {
+      const auto &line = m_recentChat[(m_chatCursor + i) % 4];
+
+      if (!line.empty ()) {
+         context.appendf (";chat:%s", line.chars ());
+      }
+   }
+   return context;
+}
+
+void BotChatManager::recordChat (int speakerIndex, StringRef message) {
+   if (speakerIndex < 1 || speakerIndex > kGameMaxPlayers || message.empty ()) {
+      return;
+   }
+   auto speaker = game.entityOfIndex (speakerIndex);
+
+   if (game.isNullEntity (speaker)) {
+      return;
+   }
+   m_recentChat[m_chatCursor] = strings.format ("%.24s:%.90s", speaker->v.netname.chars (), message.chars ());
+   m_chatCursor = (m_chatCursor + 1) % 4;
+}
+
+bool BotChatManager::queueLlmReply (int botIndex, int speakerIndex, int depth, StringRef incoming, StringRef fallback) {
+   const int port = cv_chat_llm_port.as <int> ();
+
+   if (port == 0 || m_llmPending.length () >= 4 || incoming.empty ()) {
+      return false;
+   }
+   for (const auto &request : m_llmPending) {
+      if (request->botIndex == botIndex) {
+         return false;
+      }
+   }
+   auto bot = bots.findBotByIndex (botIndex);
+   auto speaker = game.entityOfIndex (speakerIndex);
+
+   if (!bot || game.isNullEntity (speaker)) {
+      return false;
+   }
+   auto pending = cr::makeUnique <LlmPending> ();
+   pending->botIndex = botIndex;
+   pending->speakerIndex = speakerIndex;
+   pending->depth = depth;
+   pending->round = m_roundNumber;
+   pending->botName = bot->ent ()->v.netname.str ();
+   pending->fallback = fallback;
+
+   const String botName = escapeChatJson (pending->botName);
+   const String speakerName = escapeChatJson (speaker->v.netname.str ());
+   const String line = escapeChatJson (incoming);
+   const String context = escapeChatJson (recentContext ());
+   const String body = strings.format ("{\"bot\":\"%s\",\"speaker\":\"%s\",\"line\":\"%s\",\"context\":\"%s\"}",
+      botName.chars (), speakerName.chars (), line.chars (), context.chars ());
+
+   auto *request = pending.get ();
+   pending->thread = cr::makeUnique <Thread> ([request, body, port] () {
+      const String reply = requestLocalChat (body, port);
+      MutexScopedLock lock (request->lock);
+      request->reply = reply;
+      request->ready = true;
+   });
+
+   if (!pending->thread->ok ()) {
+      return false;
+   }
+   m_llmPending.push (cr::move (pending));
+   return true;
+}
+
+bool BotChatManager::hasLlmPending (int botIndex) const {
+   for (const auto &request : m_llmPending) {
+      if (request->botIndex == botIndex) {
+         return true;
+      }
+   }
+   return false;
+}
+
+void BotChatManager::pollLlmReplies () {
+   for (size_t i = 0; i < m_llmPending.length (); ) {
+      auto &request = m_llmPending[i];
+      bool ready = false;
+
+      {
+         MutexScopedLock lock (request->lock);
+         ready = request->ready;
+      }
+      if (!ready) {
+         ++i;
+         continue;
+      }
+      auto complete = cr::move (request);
+      m_llmPending.erase (i, 1);
+      complete->thread->join ();
+
+      if (complete->round != m_roundNumber) {
+         continue;
+      }
+      auto bot = bots.findBotByIndex (complete->botIndex);
+
+      if (!bot || bot->ent ()->v.netname.str () != complete->botName.str ()) {
+         continue;
+      }
+      const StringRef reply = complete->reply.empty () ? complete->fallback : complete->reply;
+
+      if (reply.empty ()) {
+         continue;
+      }
+      bot->m_sayTextBuffer.entityIndex = complete->speakerIndex;
+      bot->m_sayTextBuffer.replyDepth = complete->depth;
+      bot->prepareChatMessage (reply);
+      bot->pushMsgQueue (BotMsg::Say);
+   }
+}
+
+void BotChatManager::shutdownLlm () {
+   for (auto &request : m_llmPending) {
+      request->thread->join ();
+   }
+   m_llmPending.clear ();
 }
 
 void BotChatManager::stripTags (String &line) {
@@ -173,6 +521,19 @@ void Bot::prepareChatMessage (StringRef message) {
    auto addChatErrors = [&] () {
       if (!m_chatBuffer.empty ()) {
          chatlib.addChatErrors (m_chatBuffer);
+         String safe {};
+
+         for (size_t i = 0; i < m_chatBuffer.length () && i < 180; ++i) {
+            const auto c = m_chatBuffer[i];
+
+            if (c == '"' || c == '\\' || c == ';' || static_cast <unsigned char> (c) < 32) {
+               safe.append (" ");
+            }
+            else {
+               safe.appendf ("%c", c);
+            }
+         }
+         m_chatBuffer = cr::move (safe);
       }
    };
 
@@ -284,8 +645,8 @@ void Bot::prepareChatMessage (StringRef message) {
    while (replaceCounter < 6 && (pos = m_chatBuffer.find ('%')) != String::InvalidIndex) {
       const auto replacePosition = pos + 1;
 
-      if (replacePosition > m_chatBuffer.length ()) {
-         continue;
+      if (replacePosition >= m_chatBuffer.length ()) {
+         break;
       }
 
       // found one, let's do replace
@@ -346,35 +707,155 @@ bool Bot::checkChatKeywords (String &reply) {
    return chatlib.checkKeywords (utf8tools.strToUpper (m_sayTextBuffer.sayText), reply);
 }
 
-bool Bot::isReplyingToChat () {
-   // this function sends reply to a player
+bool Bot::receiveChat (int speakerIndex, StringRef message, int depth, bool fromBot) {
+   if (!cv_chat || speakerIndex < 1 || speakerIndex > kGameMaxPlayers || message.empty () || depth > 2) {
+      return false;
+   }
+   if (fromBot && !chatlib.hasHumanOnTeam (m_team)) {
+      return false;
+   }
 
-   if (m_sayTextBuffer.entityIndex != -1 && !m_sayTextBuffer.sayText.empty ()) {
-      // check is time to chat is good
-      if (m_sayTextBuffer.timeNextChat < game.time () + rg (m_sayTextBuffer.chatDelay / 2, m_sayTextBuffer.chatDelay)) {
-         String replyText {};
+   // A named bot owns the reply. Plain team chat can receive several answers.
+   String upper = utf8tools.strToUpper (message);
+   upper.trim ().trim ("\"");
+   bool directed = false;
+   for (const auto &other : bots) {
+      String name = utf8tools.strToUpper (other->pev->netname.str ());
 
-         if (rg.chance (m_sayTextBuffer.chatProbability + rg (40, 70)) && checkChatKeywords (replyText)) {
-            prepareChatMessage (replyText);
-            pushMsgQueue (BotMsg::Say);
+      if (name.empty ()) {
+         continue;
+      }
+      if (upper.contains (strings.format ("@%s", name.chars ()))
+         || upper.contains (strings.format ("%s:", name.chars ()))
+         || upper.startsWith (strings.format ("%s,", name.chars ()))) {
 
-            m_sayTextBuffer.entityIndex = -1;
-            m_sayTextBuffer.timeNextChat = game.time () + m_sayTextBuffer.chatDelay;
-            m_sayTextBuffer.sayText.clear ();
-
-            return true;
+         if (other->entindex () != entindex ()) {
+            return false;
          }
-         m_sayTextBuffer.entityIndex = -1;
-         m_sayTextBuffer.sayText.clear ();
+         directed = true;
+         break;
       }
    }
-   return false;
+   if (m_sayTextBuffer.pending.length () >= 3) {
+      m_sayTextBuffer.pending.shift ();
+   }
+   PendingChat incoming {};
+   incoming.speakerIndex = speakerIndex;
+   incoming.depth = depth;
+   incoming.fromBot = fromBot;
+   incoming.directed = directed;
+   incoming.readyAt = game.time () + rg (1.5f, 3.5f);
+   incoming.text = message;
+   m_sayTextBuffer.pending.push (cr::move (incoming));
+   return true;
+}
+
+bool Bot::isReplyingToChat () {
+   if (m_sayTextBuffer.pending.empty () || m_sayTextBuffer.timeNextChat > game.time ()
+      || chatlib.hasLlmPending (index ())) {
+      return false;
+   }
+   if (m_sayTextBuffer.pending[0].readyAt > game.time ()) {
+      return false;
+   }
+   auto incoming = cr::move (m_sayTextBuffer.pending[0]);
+   m_sayTextBuffer.pending.shift ();
+
+   if (incoming.fromBot && !chatlib.hasHumanOnTeam (m_team)) {
+      return false;
+   }
+   m_sayTextBuffer.entityIndex = incoming.speakerIndex;
+   m_sayTextBuffer.sayText = incoming.text;
+   m_sayTextBuffer.replyDepth = incoming.depth + 1;
+   const auto forget = [&] () {
+      m_sayTextBuffer.entityIndex = -1;
+      m_sayTextBuffer.sayText.clear ();
+      m_sayTextBuffer.replyDepth = 0;
+   };
+
+   const int style = m_personality == Personality::Rusher ? 10 : m_personality == Personality::Careful ? -15 : 0;
+   const int chance = cr::clamp (m_sayTextBuffer.chatProbability / 2 + style
+      + (incoming.directed ? 40 : incoming.fromBot ? -20 : 15), 5, 90);
+   if (!rg.chance (chance)) {
+      forget ();
+      return false;
+   }
+   String replyText {};
+   const bool hasFallback = checkChatKeywords (replyText);
+
+   if (rg.chance (incoming.fromBot ? 25 : 65)
+      && chatlib.queueLlmReply (index (), incoming.speakerIndex, m_sayTextBuffer.replyDepth,
+         incoming.text, replyText)) {
+
+      m_lastChatTime = game.time ();
+      m_sayTextBuffer.timeNextChat = game.time () + m_sayTextBuffer.chatDelay;
+      forget ();
+      return true;
+   }
+   if (!hasFallback) {
+      forget ();
+      return false;
+   }
+   prepareChatMessage (replyText);
+   pushMsgQueue (BotMsg::Say);
+   m_lastChatTime = game.time ();
+   m_sayTextBuffer.timeNextChat = game.time () + m_sayTextBuffer.chatDelay;
+   forget ();
+   return true;
 }
 
 void Bot::checkForChat () {
    // say a text every now and then
 
-   if (m_isAlive || !cv_chat || game.is (GameFlags::CSDM)) {
+   if (!cv_chat) {
+      return;
+   }
+   if (m_adaptAnnouncePending && m_isAlive && m_buyingFinished
+      && chatlib.hasHumanOnTeam (m_team)
+      && bots.getLastChatTimestamp () + 5.0f < game.time ()) {
+      m_adaptAnnouncePending = false;
+      prepareChatMessage ("That route got me twice. Taking a safer path this round.");
+      pushMsgQueue (BotMsg::SayTeam);
+      bots.setLastChatTimestamp (game.time ());
+      return;
+   }
+   if (isReplyingToChat ()) {
+      return;
+   }
+   if (chatlib.hasLlmPending (index ())) {
+      return;
+   }
+   if (m_isAlive && m_nextSocialChat <= game.time ()
+      && (game.time () < gameState.getRoundStartTime () || gameState.isRoundOver ())) {
+
+      m_nextSocialChat = game.time () + rg (20.0f, 40.0f);
+
+      if (chatlib.hasHumanOnTeam (m_team) && bots.getLastChatTimestamp () + 8.0f < game.time ()
+         && rg.chance (m_personality == Personality::Careful ? 15 : m_personality == Personality::Rusher ? 40 : 28)) {
+
+         Array <edict_t *> teammates {};
+
+         for (const auto &client : util.getClients ()) {
+            if ((client.flags & ClientFlags::Used) && client.team == m_team && client.ent != ent ()) {
+               teammates.push (client.ent);
+            }
+         }
+         if (!teammates.empty ()) {
+            const auto teammate = teammates.random ();
+            const String opener = gameState.isRoundOver ()
+               ? strings.format ("%s, ready for the next round?", teammate->v.netname.chars ())
+               : strings.format ("%s, ready to push?", teammate->v.netname.chars ());
+
+            m_sayTextBuffer.replyDepth = 0;
+            prepareChatMessage (opener);
+            pushMsgQueue (BotMsg::SayTeam);
+            m_lastChatTime = game.time ();
+            bots.setLastChatTimestamp (game.time ());
+            return;
+         }
+      }
+   }
+   if (m_isAlive || game.is (GameFlags::CSDM)) {
       return;
    }
 
@@ -382,7 +863,7 @@ void Bot::checkForChat () {
    if (rg.chance (cv_chat_percent.as <int> ())
       && m_lastChatTime + rg (6.0f, 10.0f) < game.time ()
       && bots.getLastChatTimestamp () + rg (2.5f, 5.0f) < game.time ()
-      && !isReplyingToChat ()) {
+      && chatlib.hasHumanOnTeam (m_team)) {
 
       if (conf.hasChatBank (Chat::Dead)) {
          StringRef phrase = conf.pickRandomFromChatBank (Chat::Dead);
@@ -448,13 +929,8 @@ void Bot::sendToChatLegacy (StringRef message, bool teamOnly) {
       }
       auto rcv = bots[client.ent];
 
-      if (rcv != nullptr) {
-         rcv->m_sayTextBuffer.entityIndex = m_index;
-
-         rcv->m_sayTextBuffer.sayText = message;
-         rcv->m_sayTextBuffer.timeNextChat = game.time () + rcv->m_sayTextBuffer.chatDelay;
-      }
-      else {
+      // Bots already receive this through pushMsgQueue; avoid duplicate turns.
+      if (rcv == nullptr) {
          return; // do not send to controlled bots
       }
 

@@ -117,6 +117,7 @@ struct FrameDelay {
 // shared team data for bot
 struct BotTeamData {
    bool leaderChoosen {}; // is team leader choose thees round
+   bool flankPlanned {}; // one optional flanker decision per round
    bool positiveEco {};  // is team able to buy anything
    float lastRadioTimestamp {}; // global radio time
    int32_t lastRadioSlot = { kInvalidRadioSlot }; // last radio message for team
@@ -214,6 +215,7 @@ public:
 class Bot final {
 public:
    friend class BotManager;
+   friend class BotChatManager;
 
 private:
    mutable Mutex m_pathFindLock {};
@@ -257,6 +259,8 @@ private:
    float m_timeDoorOpen {}; // time to next door open check
    float m_timeHitDoor {}; // specific time after hitting the door
    float m_lastChatTime {}; // time bot last chatted
+   float m_typingUntil {}; // finish composing queued text before sending it
+   float m_nextSocialChat {}; // next optional team conversation opener
    float m_timeLogoSpray {}; // time bot last spray logo
    float m_knifeAttackTime {}; // time to rush with knife (at the beginning of the round)
    float m_duckDefuseCheckTime {}; // time to check for ducking for defuse
@@ -655,6 +659,12 @@ public:
    float m_enemyIgnoreTimer {}; // ignore enemy for some time
    float m_seeEnemyTime {}; // time bot sees enemy
    float m_enemySurpriseTime {}; // time of surprise
+   float m_reactionLastVisible[kGameMaxPlayers + 1] {}; // per-player exposure timestamps
+   float m_reactionReadyAt[kGameMaxPlayers + 1] {}; // per-player first-shot readiness
+   float m_nextReactionScan {};
+   float m_recentKillAt {};
+   float m_flickErrorUntil {};
+   Vector m_flickOffset {};
    float m_idealReactionTime {}; // time of base reaction
    float m_actualReactionTime {}; // time of current reaction time
    float m_timeNextTracking {}; // time node index for tracking player is recalculated
@@ -681,6 +691,13 @@ public:
    int m_radioOrder {}; // actual command
    int m_prevGoalIndex {}; // holds destination goal node
    int m_chosenGoalIndex {}; // used for experience, same as above
+   int m_flankGoalIndex { kInvalidNodeIndex }; // temporary lateral waypoint ordered by captain
+   float m_flankExpiresAt {};
+   int m_lastDeathNode { kInvalidNodeIndex }; // repeated danger area across rounds
+   int m_repeatedRouteDeaths {};
+   int m_adaptRoundsLeft {};
+   bool m_adaptStrategyActive {};
+   bool m_adaptAnnouncePending {};
    int m_lastDamageType {}; // stores last damage
    int m_team {}; // bot team
    int m_currentWeapon {}; // one current weapon for each bot
@@ -734,6 +751,7 @@ public:
    Array <BotTask> m_tasks {};
 
    Deque <int32_t> m_msgQueue {};
+   Deque <QueuedChat> m_chatQueue {}; // preserves each pending line and its conversation depth
    Array <int32_t> m_goalHist {};
 
    FrameDelay m_thinkTimer {};
@@ -753,6 +771,7 @@ public:
    void enteredBuyZone (int buyState);
    void pushMsgQueue (int message);
    void prepareChatMessage (StringRef message);
+   bool receiveChat (int speakerIndex, StringRef message, int depth, bool fromBot);
    void checkForChat ();
    void showChatterIcon (bool show, bool disconnect = false) const;
    void clearSearchNodes ();

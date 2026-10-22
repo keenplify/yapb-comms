@@ -199,6 +199,7 @@ void Game::onSpawnEntity (edict_t *ent) {
 }
 
 void Game::levelShutdown () {
+   chatlib.shutdownLlm ();
    // save collected practice on shutdown
    practice.save ();
 

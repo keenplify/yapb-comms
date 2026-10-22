@@ -148,6 +148,7 @@ struct ExtenHeader {
 class BotGraph final : public Singleton <BotGraph> {
 public:
    friend class Bot;
+   friend class BotManager;
 
 private:
    int m_editFlags {};

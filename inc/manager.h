@@ -91,6 +91,7 @@ public:
    void initRound ();
    void decrementQuota (int by = 1);
    void selectLeaders (int team, bool reset);
+   void planFlank (int team);
    void listBots ();
    void setWeaponMode (int selection);
    void updateTeamEconomics (int team, bool setTrue = false);

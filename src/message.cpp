@@ -34,6 +34,9 @@ void MessageDispatcher::netMsgTextMsg () {
       util.setNeedForWelcome (true);
    }
    else if (cached & TextMsgCache::CounterWin) {
+      if (StringRef (m_args[msg].chars_) == "#Bomb_Defused") {
+         chatlib.recordEvent ("bomb_defused");
+      }
       bots.setLastWinner (Team::CT); // update last winner for economics
       resetBombPosition ();
    }
@@ -55,6 +58,7 @@ void MessageDispatcher::netMsgTextMsg () {
    }
    else if ((cached & TextMsgCache::BombPlanted) && !gameState.isBombPlanted ()) {
       gameState.setBombPlanted (true);
+      chatlib.recordEvent ("bomb_planted");
 
       for (const auto &notify : bots) {
          if (notify->m_isAlive) {

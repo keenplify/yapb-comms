@@ -300,6 +300,7 @@ Bot *BotManager::findAliveBot () {
 
 void BotManager::frame () {
    // this function calls showframe function for all available at call moment bots
+   chatlib.pollLlmReplies ();
 
    for (const auto &bot : m_bots) {
       bot->frame ();
@@ -486,7 +487,89 @@ void BotManager::maintainLeaders () {
    if (gameState.getRoundStartTime () + rg (1.5f, 3.0f) < game.time ()) {
       for (int team = 0; team < kGameTeamNum; ++team) {
          selectLeaders (team, false);
+         planFlank (team);
       }
+   }
+}
+
+void BotManager::planFlank (int team) {
+   auto &teamData = m_teamData[team];
+
+   if (!teamData.leaderChoosen || teamData.flankPlanned) {
+      return;
+   }
+   teamData.flankPlanned = true;
+
+   // A flank is occasional, never a standing order for the entire team.
+   if (!rg.chance (35) || graph.length () == 0) {
+      return;
+   }
+   Bot *leader = nullptr;
+   Bot *flanker = nullptr;
+
+   for (const auto &bot : m_bots) {
+      if (bot->m_team != team || !bot->m_isAlive) {
+         continue;
+      }
+      if (bot->m_isLeader) {
+         leader = bot.get ();
+      }
+      else if (!bot->m_hasC4 && !bot->m_isVIP && !bot->m_hasHostage
+         && (bot->m_personality == Personality::Rusher || rg.chance (40))) {
+         flanker = bot.get ();
+      }
+   }
+   if (!leader || !flanker) {
+      return;
+   }
+   const auto &objectives = !graph.m_goalPoints.empty () ? graph.m_goalPoints
+      : team == Team::Terrorist ? graph.m_ctPoints : graph.m_terrorPoints;
+
+   if (objectives.empty ()) {
+      return;
+   }
+   const auto &start = leader->pev->origin;
+   const auto &target = graph[objectives.random ()].origin;
+   const float dx = target.x - start.x;
+   const float dy = target.y - start.y;
+   const float directionLengthSq = dx * dx + dy * dy;
+
+   if (directionLengthSq < cr::sqrf (700.0f)) {
+      return;
+   }
+   const float directionLength = cr::sqrtf (directionLengthSq);
+   int best = kInvalidNodeIndex;
+   float bestScore = 0.0f;
+
+   for (int index = 0; index < graph.length (); ++index) {
+      const auto &node = graph[index];
+      const float wx = node.origin.x - start.x;
+      const float wy = node.origin.y - start.y;
+      const float forward = wx * dx + wy * dy;
+      const float side = cr::abs (wx * dy - wy * dx) / directionLength;
+      const float travel = flanker->pev->origin.distanceSq2d (node.origin);
+
+      if ((node.flags & NodeFlag::Ladder) || forward < directionLengthSq * 0.2f
+         || forward > directionLengthSq * 0.85f || side < 350.0f || side > 1500.0f
+         || travel > cr::sqrf (2500.0f)) {
+         continue;
+      }
+      const float score = side - cr::sqrtf (travel) * 0.15f + rg (0.0f, 100.0f);
+
+      if (score > bestScore) {
+         bestScore = score;
+         best = index;
+      }
+   }
+   if (!graph.exists (best)) {
+      return;
+   }
+   flanker->m_flankGoalIndex = best;
+   flanker->m_flankExpiresAt = game.time () + 35.0f;
+
+   if (chatlib.hasHumanOnTeam (team) && cv_chat) {
+      leader->prepareChatMessage (strings.format ("%s, take the side route. We'll push up.", flanker->pev->netname.chars ()));
+      leader->pushMsgQueue (BotMsg::SayTeam);
    }
 }
 
@@ -838,6 +921,9 @@ bool BotManager::hasCustomCSDMSpawnEntities () {
 
 void BotManager::setLastWinner (int winner) {
    m_lastWinner = winner;
+   if (!gameState.isRoundOver ()) {
+      chatlib.recordRoundWin (winner);
+   }
    gameState.setRoundOver (true);
 
    if (cv_radio_mode.as <int> () != 2) {
@@ -1267,6 +1353,7 @@ Bot::Bot (edict_t *bot, int difficulty, int personality, int team, int skin) {
 
    // just to be sure
    m_msgQueue.clear ();
+   m_chatQueue.clear ();
 
    // init async planner
    m_planner = cr::makeUnique <AStarAlgo> (graph.length ());
@@ -1406,6 +1493,7 @@ void BotManager::disconnectBot (Bot *bot) {
 }
 
 void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
+   chatlib.recordDeath (killer, victim);
    const auto killerTeam = game.getRealPlayerTeam (killer);
    const auto victimTeam = game.getRealPlayerTeam (victim);
 
@@ -1460,6 +1548,24 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
 
    // mark bot as "spawned", and reset it to new-round state when it dead (for csdm/zombie only)
    if (victimBot != nullptr) {
+      if (killerTeam != victimTeam && !game.is (GameFlags::CSDM | GameFlags::FreeForAll)) {
+         const int deathNode = graph.getNearest (victim->v.origin, 512.0f);
+
+         if (graph.exists (deathNode)) {
+            if (graph.exists (victimBot->m_lastDeathNode)
+               && graph[deathNode].origin.distanceSq2d (graph[victimBot->m_lastDeathNode].origin) < cr::sqrf (600.0f)) {
+               ++victimBot->m_repeatedRouteDeaths;
+            }
+            else {
+               victimBot->m_repeatedRouteDeaths = 1;
+            }
+            victimBot->m_lastDeathNode = deathNode;
+
+            if (victimBot->m_repeatedRouteDeaths >= 2) {
+               victimBot->m_adaptRoundsLeft = 2;
+            }
+         }
+      }
       victimBot->spawned ();
 
       victimBot->m_isAlive = false;
@@ -1468,6 +1574,9 @@ void BotManager::handleDeath (edict_t *killer, edict_t *victim) {
    // is this message about a bot who killed somebody?
    if (killerBot != nullptr) {
       killerBot->setLastVictim (victim);
+      if (killerTeam != victimTeam) {
+         killerBot->m_recentKillAt = game.time ();
+      }
    }
 
    // did a human kill a bot on his team?
@@ -1524,12 +1633,32 @@ void Bot::newRound () {
    m_team = game.getPlayerTeam (ent ());
 
    resetPathSearchType ();
+   m_adaptStrategyActive = m_adaptRoundsLeft > 0 && graph.exists (m_lastDeathNode)
+      && !game.is (GameFlags::CSDM | GameFlags::FreeForAll);
+   m_adaptAnnouncePending = m_adaptStrategyActive;
+
+   if (m_adaptStrategyActive) {
+      m_pathType = FindPath::Safe;
+      --m_adaptRoundsLeft;
+   }
+   m_typingUntil = 0.0f;
 
    // clear all states & tasks
    m_states = 0;
    clearTasks ();
 
    m_isLeader = false;
+   m_flankGoalIndex = kInvalidNodeIndex;
+   m_flankExpiresAt = 0.0f;
+   m_recentKillAt = 0.0f;
+   m_flickErrorUntil = 0.0f;
+   m_flickOffset.clear ();
+   m_nextReactionScan = 0.0f;
+
+   for (int i = 0; i <= kGameMaxPlayers; ++i) {
+      m_reactionLastVisible[i] = 0.0f;
+      m_reactionReadyAt[i] = 0.0f;
+   }
    m_hasProgressBar = false;
    m_canSetAimDirection = true;
    m_preventFlashing = 0.0f;
@@ -1654,6 +1783,9 @@ void Bot::newRound () {
    m_sayTextBuffer.timeNextChat = game.time ();
    m_sayTextBuffer.entityIndex = -1;
    m_sayTextBuffer.sayText.clear ();
+   m_sayTextBuffer.replyDepth = 0;
+   m_sayTextBuffer.pending.clear ();
+   m_nextSocialChat = game.time () + rg (1.0f, 4.0f);
 
    m_buyState = BuyState::PrimaryWeapon;
    m_lastEquipTime = 0.0f;
@@ -1726,6 +1858,7 @@ void Bot::newRound () {
    m_heardSoundTime = game.time ();
 
    m_msgQueue.clear ();
+   m_chatQueue.clear ();
    m_goalHist.clear ();
    m_ignoredBreakable.clear ();
 
@@ -1966,11 +2099,18 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
 
    if (cmd.startsWith ("say")) {
       const bool alive = game.isAliveEntity (ent);
+      const StringRef spoken = engfuncs.pfnCmd_Args ();
       int team = -1;
 
       if (cmd.endsWith ("team")) {
          team = game.getRealPlayerTeam (ent);
       }
+
+      if (spoken.empty ()) {
+         return;
+      }
+      chatlib.recordChat (game.indexOfPlayer (ent), spoken);
+      Array <Bot *> recipients {};
 
       for (const auto &client : util.getClients ()) {
          if (!(client.flags & ClientFlags::Used) || (team != -1 && team != client.team2) || alive != game.isAliveEntity (client.ent)) {
@@ -1979,13 +2119,15 @@ void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
          auto target = bots[client.ent];
 
          if (target != nullptr) {
-            target->m_sayTextBuffer.entityIndex = game.indexOfPlayer (ent);
+            recipients.push (target);
+         }
+      }
+      recipients.shuffle ();
+      int delivered = 0;
 
-            if (strings.isEmpty (engfuncs.pfnCmd_Args ())) {
-               continue;
-            }
-            target->m_sayTextBuffer.sayText = engfuncs.pfnCmd_Args ();
-            target->m_sayTextBuffer.timeNextChat = game.time () + target->m_sayTextBuffer.chatDelay;
+      for (auto *target : recipients) {
+         if (target->receiveChat (game.indexOfPlayer (ent), spoken, 0, false) && ++delivered == 2) {
+            break;
          }
       }
    }
@@ -2049,6 +2191,7 @@ void BotManager::selectLeaders (int team, bool reset) {
 
    if (reset) {
       leaderChoosen = false;
+      m_teamData[team].flankPlanned = false;
       return;
    }
 
@@ -2145,6 +2288,7 @@ void BotManager::selectLeaders (int team, bool reset) {
 
 void BotManager::initRound () {
    // this is called at the start of each round
+   chatlib.beginRound ();
 
    // check team economics
    for (int team = 0; team < kGameTeamNum; ++team) {

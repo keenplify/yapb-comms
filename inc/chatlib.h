@@ -26,13 +26,31 @@ public:
    }
 };
 
-// define chatting collection structure
+struct PendingChat {
+   int speakerIndex {};
+   int depth {};
+   float readyAt {};
+   bool fromBot {};
+   bool directed {};
+   String text {};
+};
+
+struct QueuedChat {
+   String text {};
+   int replyDepth {};
+   bool teamOnly {};
+};
+
+// Per-bot conversation state. Keep a small queue so overlapping speakers do not
+// overwrite one another while a bot is waiting to answer.
 struct ChatCollection {
    int chatProbability {};
    float chatDelay {};
    float timeNextChat {};
    int entityIndex {};
    String sayText {};
+   int replyDepth {};
+   Array <PendingChat> pending {};
    StringArray lastUsedSentences {};
 };
 
@@ -40,7 +58,30 @@ struct ChatCollection {
 // bot's chat manager
 class BotChatManager : public Singleton <BotChatManager> {
 private:
+   struct LlmPending {
+      Mutex lock {};
+      UniquePtr <Thread> thread {};
+      String reply {};
+      String fallback {};
+      String botName {};
+      int botIndex {};
+      int speakerIndex {};
+      int depth {};
+      int round {};
+      bool ready {};
+   };
+
    SmallArray <Twin <String, String>> m_clanTags {}; // strippable clan tags
+   Array <UniquePtr <LlmPending>> m_llmPending {};
+   String m_recentChat[4] {};
+   int m_chatCursor {};
+   int m_roundKills[kGameMaxPlayers + 1] {};
+   int m_killStreak[kGameMaxPlayers + 1] {};
+   int m_startTeamPlayers[kGameTeamNum] {};
+   int m_lastKiller {};
+   int m_lastVictim {};
+   int m_roundNumber {};
+   String m_recentEvents {};
 
 public:
    BotChatManager ();
@@ -58,6 +99,17 @@ public:
 
    // chat helper to find keywords for given string
    bool checkKeywords (StringRef line, String &reply);
+   bool hasHumanOnTeam (int team) const;
+   void beginRound ();
+   void recordDeath (edict_t *killer, edict_t *victim);
+   void recordEvent (StringRef event);
+   void recordRoundWin (int team);
+   String recentContext () const;
+   void recordChat (int speakerIndex, StringRef message);
+   bool queueLlmReply (int botIndex, int speakerIndex, int depth, StringRef incoming, StringRef fallback);
+   bool hasLlmPending (int botIndex) const;
+   void pollLlmReplies ();
+   void shutdownLlm ();
 };
 
 // expose global

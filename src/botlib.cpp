@@ -47,19 +47,11 @@ ConVar mp_footsteps ("mp_footsteps", nullptr, Var::GameRef);
 void Bot::pushMsgQueue (int message) {
    // this function put a message into the bot message queue
 
-   if (message == BotMsg::Say) {
-      // notify other bots of the spoken text otherwise, bots won't respond to other bots (network messages aren't sent from bots)
-      const int entityIndex = index ();
-
-      for (const auto &other : bots) {
-         if (other->pev != pev) {
-            if (m_isAlive == other->m_isAlive) {
-               other->m_sayTextBuffer.entityIndex = entityIndex;
-               other->m_sayTextBuffer.sayText = m_chatBuffer;
-            }
-            other->m_sayTextBuffer.timeNextChat = game.time () + other->m_sayTextBuffer.chatDelay;
-         }
-      }
+   if (message == BotMsg::Say || message == BotMsg::SayTeam) {
+      m_chatQueue.emplaceLast (QueuedChat { m_chatBuffer, m_sayTextBuffer.replyDepth, message == BotMsg::SayTeam });
+      const float typingTime = cr::clamp (0.25f + static_cast <float> (m_chatBuffer.length ()) * 0.012f, 0.4f, 1.2f);
+      m_typingUntil = cr::max (m_typingUntil, game.time ()) + typingTime;
+      m_sayTextBuffer.replyDepth = 0;
    }
    m_msgQueue.emplaceLast (message);
 }
@@ -1149,12 +1141,25 @@ void Bot::checkMsgQueue () {
 
       // team independent saytext
    case BotMsg::Say:
-      sendToChat (m_chatBuffer, false);
-      break;
-
-      // team dependent saytext
    case BotMsg::SayTeam:
-      sendToChat (m_chatBuffer, true);
+      if (m_typingUntil > game.time ()) {
+         m_msgQueue.emplaceLast (state);
+         return;
+      }
+      if (!m_chatQueue.empty ()) {
+         const QueuedChat line = m_chatQueue.popFront ();
+         sendToChat (line.text, line.teamOnly);
+         chatlib.recordChat (entindex (), line.text);
+
+         // The engine does not deliver bot chat back to other bots.
+         if (line.replyDepth < 2 && chatlib.hasHumanOnTeam (m_team)) {
+            for (const auto &other : bots) {
+               if (other->pev != pev && other->m_team == m_team && m_isAlive == other->m_isAlive) {
+                  other->receiveChat (entindex (), line.text, line.replyDepth, true);
+               }
+            }
+         }
+      }
       break;
 
    default:
@@ -3452,6 +3457,45 @@ void Bot::logic () {
          m_moveSpeed = -pev->maxspeed;
          m_strafeSpeed = pev->maxspeed * static_cast <float> (m_needAvoidGrenade);
       }
+   }
+
+   // Leave a little room behind a moving teammate on the same route. Existing
+   // collision avoidance still handles close passes and narrow passages.
+   if (m_moveSpeed > 0.0f && m_moveToGoal && !isOnLadder ()
+      && game.isNullEntity (m_enemy) && !(m_states & Sense::SeeingEnemy)
+      && m_needAvoidGrenade == 0 && !m_hasC4 && !m_isVIP && !m_hasHostage) {
+      for (const auto &client : util.getClients ()) {
+         if (!(client.flags & ClientFlags::Used) || !(client.flags & ClientFlags::Alive)
+            || client.team != m_team || client.ent == ent ()) {
+            continue;
+         }
+         const auto delta = client.ent->v.origin - pev->origin;
+         const float distanceSq = delta.lengthSq2d ();
+         const float desiredGap = 105.0f + static_cast <float> (index () % 4) * 15.0f;
+
+         if (distanceSq < cr::sqrf (65.0f) || distanceSq > cr::sqrf (desiredGap + 65.0f)) {
+            continue;
+         }
+         const auto route = (m_destOrigin - pev->origin).normalize2d_apx ();
+         const auto travel = client.ent->v.velocity.normalize2d_apx ();
+
+         if ((delta.normalize2d_apx () | route) > 0.7f && (travel | route) > 0.5f
+            && client.ent->v.velocity.lengthSq2d () > cr::sqrf (45.0f)) {
+            m_moveSpeed = cr::min (m_moveSpeed, cr::max (getShiftSpeed (), client.ent->v.velocity.length2d () * 0.7f));
+            break;
+         }
+      }
+   }
+
+   // A bot briefly stops while typing, but immediate threats and critical
+   // objective actions can interrupt that pause.
+   if (m_typingUntil > game.time () && m_isAlive && !isOnLadder ()
+      && game.isNullEntity (m_enemy) && !(m_states & Sense::SeeingEnemy)
+      && m_needAvoidGrenade == 0 && getCurrentTaskId () != Task::PlantBomb
+      && getCurrentTaskId () != Task::DefuseBomb) {
+      m_moveSpeed = 0.0f;
+      m_strafeSpeed = 0.0f;
+      m_navTimeset = game.time ();
    }
 
    // ensure we're not stuck picking something
