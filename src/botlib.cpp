@@ -10,6 +10,7 @@
 #include <bhop.h>
 #include <radio_comms.h>
 #include <movement_view.h>
+#include <simulated_away.h>
 
 ConVar cv_debug ("debug", "0", "Enables or disables useful messages about bot states. Not required for end users.", true, 0.0f, 4.0f);
 ConVar cv_debug_goal ("debug_goal", "-1", "Forces all alive bots to build a path and go to the graph node specified here.", true, -1.0f, kMaxNodes);
@@ -3141,7 +3142,47 @@ void Bot::checkParachute () {
    }
 }
 
+bool Bot::isSimulatedAway () const {
+ // Cvars persist across map changes. Cache bindings; when the core is absent,
+ // retry at most once a second and tolerate the map clock restarting at zero.
+ static cvar_t *owner = nullptr, *until = nullptr, *mode = nullptr;
+ static cvar_t *enabled = nullptr, *live = nullptr, *completed = nullptr;
+ static float retryAt = 0;
+ const float now = game.time ();
+ if (!owner) {
+  if (retryAt > now && retryAt - now <= 1.0f) return false;
+  owner = engfuncs.pfnCVarGetPointer("competitive_bot_away_userid");
+  retryAt = now + 1.0f;
+ }
+ if (!owner || owner->value <= 0) return false;
+ const int userid = engfuncs.pfnGetPlayerUserId (ent ());
+ if (owner->value != static_cast<float>(userid)) return false;
+ if (!until) until = engfuncs.pfnCVarGetPointer("competitive_bot_away_until");
+ if (!mode) mode = engfuncs.pfnCVarGetPointer("competitive_game_mode");
+ if (!enabled) enabled = engfuncs.pfnCVarGetPointer("competitive_bot_away");
+ if (!live) live = engfuncs.pfnCVarGetPointer("competitive_match_live");
+ if (!completed) completed = engfuncs.pfnCVarGetPointer("competitive_match_completed");
+ return until && mode && enabled && live && completed && simulatedAwayLease(now,
+    until->value, owner->value, userid, mode->value, enabled->value > 0,
+    live->value > 0, completed->value > 0);
+}
+
 void Bot::frame () {
+   if (isSimulatedAway ()) {
+      m_speechQueue.clear ();
+      m_sayTextBuffer.entityIndex = -1;
+      m_sayTextBuffer.sayText.clear ();
+      m_typingUntil = 0.0f;
+      m_moveSpeed = m_strafeSpeed = 0.0f;
+      m_requestedJump = false;
+      pev->button = pev->oldbuttons = pev->impulse = 0;
+      resetCollision ();
+      // Keep normal engine physics/collisions ticking, with no AI commands.
+      engfuncs.pfnRunPlayerMove (ent (), pev->v_angle, 0.0f, 0.0f, 0.0f, 0, 0, computeMsec ());
+      m_previousThinkTime = game.time ();
+      return;
+   }
+
    if (m_graphExplorer) {
       explorer.frame (*this);
       return;
@@ -3526,7 +3567,8 @@ void Bot::checkSpawnConditions () {
       }
       m_checkKnifeSwitch = false;
 
-      if (rg.chance (cv_user_follow_percent.as <int> ()) && game.isNullEntity (m_targetEntity) && !m_isLeader && !m_hasC4 && rg.chance (50)) {
+      if (engfuncs.pfnCVarGetFloat ("competitive_game_mode") != 2.0f
+         && rg.chance (cv_user_follow_percent.as <int> ()) && game.isNullEntity (m_targetEntity) && !m_isLeader && !m_hasC4 && rg.chance (50)) {
          decideFollowUser ();
       }
    }

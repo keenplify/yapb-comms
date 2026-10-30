@@ -508,3 +508,27 @@ reloads under fire, nearby teammate deaths, bomb plant/defuse, and FFA. Compare 
 and Hard at the same server tick rate. Confirm support ends promptly and callouts
 do not repeat across teammates. Linux x86 builds are verified locally; Windows and
 live-match behavior still require runtime validation.
+
+## Coordinated Arena/FFA breaks
+
+The backend core can select one bot to say `brb`, pause for 120–180 seconds,
+then say `back`. A shared user-ID/absolute-expiry lease prevents native and
+YaPB providers from independently pausing different bots. The core enforces
+a server-wide 5–8 minute cooldown, keeps only this bot out of native idle kick,
+and leaves the bot damageable. This provider pauses AI/input and queued chatter
+only for a matching, live, Arena/FFA lease; expiry is never extended on respawn.
+Missing/invalid/stale leases leave ordinary behavior intact. Ship with the updated
+`competitive_bot_away.inc` core. `competitive_bot_away 0` disables the feature.
+See the backend's `src/amxx/BOT_AWAY.md` for policy and runtime verification.
+# Arena spacing
+
+With `competitive_game_mode 2`, normal roaming samples up to 32 graph nodes and
+favors destinations separated from living teammates and their active routes.
+Up to four preferred candidates get a real path-distance check before selection.
+Destinations avoid ladder/lift/assisted-jump nodes and incompatible team nodes;
+the usual goal selector handles sparse or disconnected graphs as a fallback.
+Clearance is capped at 700 units and travel cost discourages remote corners.
+
+Automatic follow-user rolls are disabled in Arena. Explicit player orders,
+objective carriers, and active combat retain their existing task behavior.
+Other modes, combat aiming, and physical navigation are unchanged.

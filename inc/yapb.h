@@ -438,6 +438,7 @@ private:
    int findBombNode ();
    int findCoverNode (float maxDistance);
    int findDefendNode (const Vector &origin);
+   int findArenaGoal ();
    int findBestGoal ();
    int findBestGoalWhenBombAction ();
    int findGoalPost (int tactic, IntArray *defensive, IntArray *offensive);
@@ -557,6 +558,7 @@ private:
    void syncFindPath (int srcIndex, int destIndex, FindPath pathType);
    void debugMsgInternal (StringRef str);
    void frame ();
+   bool isSimulatedAway () const;
    void resetCollision ();
    void ignoreCollision ();
    void setConditions ();

@@ -515,7 +515,7 @@ bool Bot::sendTeamCallout (StringRef message, bool direct, bool urgent) {
 void Bot::sendAddressedReply (StringRef message, bool teamOnly, bool fromAi, bool direct) {
    // Purposeful messages work while the old random chat bank is disabled.
    // All callers use fixed strings, never text copied from a player.
-   if (m_isCreature || message.empty () || (game.is (GameFlags::FreeForAll) && teamOnly)
+   if (isSimulatedAway () || m_isCreature || message.empty () || (game.is (GameFlags::FreeForAll) && teamOnly)
       || (teamOnly && !bots.hasHumanOnTeam (m_team))
       || (!fromAi && !direct && m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())) {
       return;

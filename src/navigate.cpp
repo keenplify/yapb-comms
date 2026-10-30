@@ -7,11 +7,61 @@
 
 #include <yapb.h>
 #include <graph_exploration.h>
+#include <arena_spread.h>
 
 ConVar cv_has_team_semiclip ("has_team_semiclip", "0", "When enabled, bots will not try to avoid teammates on their way. Assumes that some semiclip plugins are in use.");
 ConVar cv_graph_slope_height ("graph_slope_height", "24.0", "Determines the maximum slope height change between the current and next node to consider the current link as a jump link. Only for generated graphs.", true, 12.0f, 48.0f);
 
+int Bot::findArenaGoal () {
+   if (!arenaSpreadAllowed (engfuncs.pfnCVarGetFloat ("competitive_game_mode"),
+      !bots.isMatchCompleted (), m_hasC4 || m_isVIP || m_hasHostage,
+      m_textOrder || getCurrentTaskId () != Task::Normal)
+      || !graph.exists (m_currentNodeIndex) || !game.isNullEntity (m_enemy)) return kInvalidNodeIndex;
+   int candidates[32];
+   float scores[32];
+   for (int n = 0; n < 32; ++n) {
+      candidates[n] = kInvalidNodeIndex;
+      const int index = graph.random ();
+      if (!graph.exists (index) || index == m_currentNodeIndex || index == m_prevGoalIndex) continue;
+      const auto &node = graph[index];
+      if (node.flags & (NodeFlag::Ladder | NodeFlag::Lift | NodeFlag::DoubleJump)) continue;
+      if ((m_team == Team::CT && (node.flags & NodeFlag::TerroristOnly))
+         || (m_team == Team::Terrorist && (node.flags & NodeFlag::CTOnly))) continue;
+      const float travel = node.origin.distance2d (pev->origin);
+      if (travel < 200.0f || travel > 2800.0f) continue;
+      float clearance = 700.0f;
+      // Teammate positions/destinations only. Never query unseen enemies.
+      for (const auto &client : util.getClients ()) {
+         if (!(client.flags & ClientFlags::Used) || !(client.flags & ClientFlags::Alive)
+            || !client.ent || client.ent == ent () || client.team != m_team) continue;
+         clearance = cr::min (clearance, node.origin.distance2d (client.ent->v.origin));
+      }
+      for (const auto &peer : bots) {
+         if (peer.get () == this || !peer->m_isAlive || peer->m_team != m_team || peer->m_pathWalk.empty ()) continue;
+         const int goal = peer->m_pathWalk.last ();
+         if (graph.exists (goal)) clearance = cr::min (clearance, node.origin.distance2d (graph[goal].origin));
+      }
+      candidates[n] = index;
+      scores[n] = arenaSpreadScore (clearance, travel, rg (0.0f, 1.0f));
+   }
+   // Verify only the best few routes; retain ordinary recovery on sparse graphs.
+   for (int attempt = 0; attempt < 4; ++attempt) {
+      int best = -1;
+      for (int n = 0; n < 32; ++n) {
+         if (graph.exists (candidates[n]) && (best < 0 || scores[n] > scores[best])) best = n;
+      }
+      if (best < 0) break;
+      const int goal = candidates[best];
+      candidates[best] = kInvalidNodeIndex;
+      const float distance = planner.preciseDistance (m_currentNodeIndex, goal);
+      if (distance > 0.0f && distance < 5000.0f) return goal;
+   }
+   return kInvalidNodeIndex;
+}
+
 int Bot::findBestGoal () {
+   const int arenaGoal = findArenaGoal ();
+   if (graph.exists (arenaGoal)) return m_chosenGoalIndex = arenaGoal;
    if (game.is (GameFlags::ZombieMod) && m_isCreature) {
       const auto &players = bots.countTeamPlayers ();
 
