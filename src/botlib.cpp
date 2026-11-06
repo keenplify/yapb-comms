@@ -895,6 +895,7 @@ Vector Bot::getCampDirection (const Vector &dest) {
 }
 
 void Bot::showChatterIcon (bool show, bool disconnect) const {
+   if (show && isSilentSubstitute ()) return;
    // this function depending on show boolean, shows/remove chatter, icon, on the head of bot.
 
    if (!game.is (GameFlags::HasBotVoice) || cv_radio_mode.as <int> () != 2) {
@@ -935,6 +936,7 @@ void Bot::showChatterIcon (bool show, bool disconnect) const {
 }
 
 void Bot::instantChatter (int type) const {
+   if (isSilentSubstitute ()) return;
    // this function sends instant chatter messages.
    if (!game.is (GameFlags::HasBotVoice)
       || cv_radio_mode.as <int> () != 2
@@ -978,6 +980,7 @@ void Bot::instantChatter (int type) const {
 }
 
 void Bot::pushRadioMessage (int message) {
+   if (isSilentSubstitute ()) return;
    // this function inserts the radio message into the message queue
 
    if (cv_radio_mode.as <int> () == 0 || m_numFriendsLeft == 0 || m_isCreature) {
@@ -1079,6 +1082,7 @@ void Bot::pushRadioMessage (int message) {
 }
 
 void Bot::pushChatterMessage (int message) {
+   if (isSilentSubstitute ()) return;
    // this function inserts the voice message into the message queue (mostly same as above)
 
    if (!game.is (GameFlags::HasBotVoice) || m_isCreature || cv_radio_mode.as <int> () != 2 || !conf.hasChatterBank (message) || m_numFriendsLeft == 0) {
@@ -1193,6 +1197,11 @@ void Bot::checkMsgQueue () {
       break;
 
    case BotMsg::Radio:
+      if (isSilentSubstitute ()) {
+         m_forceRadio = false;
+         m_radioSelect = kInvalidRadioSlot;
+         break;
+      }
       if (m_radioSelect == Radio::EnemySpotted && !sightingReportAllowed (
          (pev->button | pev->oldbuttons) & IN_ATTACK,
          (m_states & Sense::SeeingEnemy) && !game.isNullEntity (m_enemy)
@@ -3273,6 +3282,9 @@ void Bot::frame () {
 
 void Bot::update () {
    const auto tid = getCurrentTaskId ();
+
+   // Substitution can be assigned after ordinary welcome/reply text was queued.
+   if (isSilentSubstitute ()) m_speechQueue.clear ();
 
    if (!m_speechQueue.empty () && m_typingUntil <= game.time ()) {
       const QueuedSpeech line = m_speechQueue.popFront ();

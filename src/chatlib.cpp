@@ -434,10 +434,14 @@ static void normalizeBotChat (String &line) {
    }
 }
 
+bool Bot::isSilentSubstitute () const {
+   return std::strcmp (engfuncs.pfnInfoKeyValue (engfuncs.pfnGetInfoKeyBuffer (ent ()), "_16c_sub"), "1") == 0;
+}
+
 void Bot::sendToChat (StringRef message, bool teamOnly) {
    // this function prints saytext message to all players
 
-   if (m_isCreature || m_commsStyle == CommsStyle::RadioOnly || message.empty () || !cv_chat) {
+   if (isSilentSubstitute () || m_isCreature || m_commsStyle == CommsStyle::RadioOnly || message.empty () || !cv_chat) {
       return;
    }
 
@@ -492,7 +496,7 @@ bool Bot::complainAboutPing (bool afterDeath) {
 }
 
 bool Bot::sendTeamCallout (StringRef message, bool direct, bool urgent) {
-   if (m_commsStyle == CommsStyle::RadioOnly || m_isCreature || message.empty ()
+   if (isSilentSubstitute () || m_commsStyle == CommsStyle::RadioOnly || m_isCreature || message.empty ()
       || game.is (GameFlags::FreeForAll) || !bots.hasHumanOnTeam (m_team)
       || (m_team != Team::Terrorist && m_team != Team::CT)
       || (!urgent && m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())
@@ -515,7 +519,7 @@ bool Bot::sendTeamCallout (StringRef message, bool direct, bool urgent) {
 void Bot::sendAddressedReply (StringRef message, bool teamOnly, bool fromAi, bool direct) {
    // Purposeful messages work while the old random chat bank is disabled.
    // All callers use fixed strings, never text copied from a player.
-   if (isSimulatedAway () || m_isCreature || message.empty () || (game.is (GameFlags::FreeForAll) && teamOnly)
+   if (isSilentSubstitute () || isSimulatedAway () || m_isCreature || message.empty () || (game.is (GameFlags::FreeForAll) && teamOnly)
       || (teamOnly && !bots.hasHumanOnTeam (m_team))
       || (!fromAi && !direct && m_lastTacticalChatTime > 0.0f && m_lastTacticalChatTime + 10.0f > game.time ())) {
       return;
@@ -536,6 +540,7 @@ void Bot::sendAddressedReply (StringRef message, bool teamOnly, bool fromAi, boo
 }
 
 void Bot::sendToChatLegacy (StringRef message, bool teamOnly) {
+   if (isSilentSubstitute ()) return;
    // this function prints saytext message to all players for legacy games (< cs 1.6)
 
    // note: for some reason using regular say & say_team for sending chat messages on hlds on a legacy games

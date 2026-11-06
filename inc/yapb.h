@@ -559,6 +559,7 @@ private:
    void debugMsgInternal (StringRef str);
    void frame ();
    bool isSimulatedAway () const;
+   bool isSilentSubstitute () const;
    void resetCollision ();
    void ignoreCollision ();
    void setConditions ();

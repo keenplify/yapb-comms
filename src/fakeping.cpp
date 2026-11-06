@@ -115,6 +115,11 @@ void BotFakePingManager::emit (edict_t *ent) {
    }
 
    for (const auto &bot : bots) {
+      // Original-player substitutes always display BOT, never simulated latency.
+      const auto info = engfuncs.pfnGetInfoKeyBuffer (bot->ent ());
+      if (std::strcmp (engfuncs.pfnInfoKeyValue (info, "_16c_sub"), "1") == 0) {
+         continue;
+      }
       m_pbm.start (ent);
 
       m_pbm.write (1, PingBitMsg::Single);
