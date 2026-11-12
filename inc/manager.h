@@ -6,6 +6,7 @@
 //
 
 #pragma once
+#include <casual_banter.h>
 
 #include <team_order.h>
 
@@ -49,6 +50,7 @@ private:
    float m_maintainTime {}; // time to maintain bot creation
    float m_quotaMaintainTime {}; // time to maintain bot quota
    float m_plantSearchUpdateTime {}; // time to update for searching planted bomb
+   CasualBanterSchedule m_casualBanter {};
    float m_lastChatTime {}; // global chat time timestamp
    float m_lastAddressedReplyTime[kGameMaxPlayers] {}; // per-player reply rate limit
    int m_lastChatPartner[kGameMaxPlayers] {};
@@ -183,6 +185,7 @@ public:
    }
    void maintainEnemyCallouts ();
    void maintainRoundChat ();
+   void maintainCasualBanter ();
    void maintainKillReactions ();
    void maintainDropOffers ();
    void acknowledgeTeamOrder (int team, bool accepted);

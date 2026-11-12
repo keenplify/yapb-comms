@@ -7,6 +7,20 @@
 
 #include <yapb.h>
 #include <holding_utility.h>
+#include <cmath>
+
+
+ConVar cv_aim_lead ("aim_lead", "0.08", "Bounded motor-lag prediction seconds for normal and harder bots.", true, 0, 0.15f);
+ConVar cv_aim_stiffness ("aim_stiffness", "1", "Combat tracking stiffness multiplier; navigation is independent.", true, 0.75f, 2.0f);
+
+float activeAimLead (int difficulty) {
+   const float value = cv_aim_lead.as <float> ();
+   return difficulty < 2 ? 0.0f : std::isfinite (value) ? cr::clamp (value, 0.0f, .15f) : .08f;
+}
+float activeAimStiffness () {
+   const float value = cv_aim_stiffness.as <float> ();
+   return std::isfinite (value) ? cr::clamp (value, .75f, 2.0f) : 1.0f;
+}
 
 ConVar cv_shoots_thru_walls ("shoots_thru_walls", "0", "Specifies whether bots are able to fire at a frozen last-known position behind a wall. Hidden players are never promoted to visible targets.", true, 0.0f, 3.0f);
 ConVar cv_ignore_enemies ("ignore_enemies", "0", "Enables or disables searching the world for enemies.");
@@ -797,16 +811,6 @@ Vector Bot::getEnemyBodyOffset () {
    }
 
    Vector spot = m_enemy->v.origin;
-   Vector compensation = nullptr;
-
-   if (!usesSniper () && !usesKnife () && distance > kSprayDistance) {
-      compensation = m_difficulty >= Difficulty::Hard
-         ? (m_enemy->v.velocity - pev->velocity) * m_frameInterval : Vector {};
-      compensation.z = 0.0f;
-   }
-   else {
-      compensation.clear ();
-   }
 
    // get the correct head origin
    const auto &headOrigin = [&] (edict_t *e, const float distance) -> Vector {
@@ -868,7 +872,6 @@ Vector Bot::getEnemyBodyOffset () {
    // Store observed information before applying motor error. Hidden targets must
    // never refresh this position from their live entity.
    m_lastEnemyOrigin = m_enemyOrigin;
-   spot += compensation;
    if (!usesKnife ()) {
       spot += getBodyOffsetError (distance);
    }
@@ -890,9 +893,22 @@ Vector Bot::getEnemyBodyOffset () {
       if (m_aimSampleEnemy != m_enemy || m_nextCombatAimSample <= game.time ()) {
          m_aimSampleEnemy = m_enemy;
          m_sampledCombatAim = spot;
-         m_nextCombatAimSample = game.time () + combatBehavior (m_difficulty).trackingInterval;
+         m_sampledCombatVelocity = m_enemy->v.velocity;
+         m_combatSampleTime = game.time ();
+         m_combatSampleBallistic = !(m_enemy->v.flags & FL_ONGROUND)
+            && m_enemy->v.movetype == MOVETYPE_WALK && m_enemy->v.waterlevel < 2;
+         m_combatSampleGravity = engfuncs.pfnCVarGetFloat ("sv_gravity")
+            * (m_enemy->v.gravity > 0.0f ? m_enemy->v.gravity : 1.0f);
+         m_nextCombatAimSample = game.time () + combatTrackingInterval (
+            combatBehavior (m_difficulty).trackingInterval, m_sampledCombatVelocity.length (), m_difficulty);
       }
-      return m_sampledCombatAim;
+      // Hitscan needs no bullet-travel lead. Compensate only sampling/motor lag
+      // using the last visible observation; never refresh an occluded target.
+      const float horizon = combatPredictionTime (game.time () - m_combatSampleTime, activeAimLead (m_difficulty));
+      Vector predicted = m_sampledCombatAim + m_sampledCombatVelocity * horizon;
+      predicted.z = m_sampledCombatAim.z + combatPredictionHeight (m_sampledCombatVelocity.z,
+         m_combatSampleGravity, horizon, m_combatSampleBallistic);
+      return predicted;
    }
    return spot;
 }

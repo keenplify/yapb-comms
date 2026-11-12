@@ -91,6 +91,7 @@ void BotManager::logAiEvent (Bot *bot, edict_t *player, StringRef text, bool tea
 }
 constexpr float kCaptainSilenceSeconds = 12.0f;
 
+ConVar cv_casual_banter ("casual_banter", "1", "One bot occasionally starts light all-chat conversation and playful banter.", true, 0, 1);
 ConVar cv_autovacate ("autovacate", "1", "Kicks bots to automatically make room for human players.");
 ConVar cv_autovacate_keep_slots ("autovacate_keep_slots", "1", "How many slots the autovacate feature should keep for human players.", true, 1.0f, 8.0f);
 ConVar cv_kick_after_player_connect ("kick_after_player_connect", "1", "Kicks the bot immediately when a human player joins the server (yb_autovacate must be enabled).");
@@ -421,7 +422,7 @@ void BotManager::frame () {
    for (const auto &bot : m_bots) {
       bot->frame ();
    }
-   if (!isMatchCompleted ()) processTeamOrderAcks ();
+   if (!isMatchCompleted ()) { processTeamOrderAcks (); maintainCasualBanter (); }
    // A local sidecar drops one validated command at a time into this mailbox.
    // Polling is bounded and never waits for the provider or a network socket.
    static float nextAiPoll = 0.0f;
@@ -1150,6 +1151,27 @@ void BotManager::maintainEnemyCallouts () {
    }
 }
 
+void BotManager::maintainCasualBanter () {
+   if (!cv_casual_banter || !cv_round_chat || isMatchCompleted ()
+      || !m_casualBanter.due (game.time ())) return;
+   bool humanPresent = false;
+   for (const auto &client : util.getClients ()) {
+      if ((client.flags & ClientFlags::Used) && client.ent && !game.isFakeClientEntity (client.ent)
+         && (client.team2 == Team::CT || client.team2 == Team::Terrorist)) { humanPresent = true; break; }
+   }
+   if (!humanPresent || gameState.isBombPlanted ()) return;
+   for (const auto &bot : m_bots) {
+      if (!bot->m_isAlive || bot->m_notStarted || bot->m_isCreature || bot->isSilentSubstitute () || bot->isSimulatedAway ()
+         || bot->m_commsStyle == CommsStyle::RadioOnly || !bot->m_speechQueue.empty ()
+         || (bot->m_states & Sense::SeeingEnemy) || bot->m_seeEnemyTime + 3.0f > game.time ()
+         || bot->m_lastTacticalChatTime + 10.0f > game.time ()) continue;
+      // Fixed mild lines, normal typing/delivery and mute rules, one speaker globally.
+      bot->sendAddressedReply (casualBanterLine (m_casualBanter.sequence), false, true);
+      if (!bot->m_speechQueue.empty ()) m_casualBanter.sent (game.time ());
+      break;
+   }
+}
+
 void BotManager::maintainRoundChat () {
    if (!cv_round_chat || game.is (GameFlags::FreeForAll)) return;
    const bool liveMatch = engfuncs.pfnCVarGetFloat ("competitive_match_live") > 0.0f;
@@ -1562,6 +1584,7 @@ void BotManager::maintainAutoKill () {
 }
 
 void BotManager::reset () {
+   m_casualBanter = {};
    m_plantSearchUpdateTime = 0.0f;
    m_lastChatTime = 0.0f;
    for (int slot = 0; slot < kGameMaxPlayers; ++slot) {
@@ -3350,6 +3373,8 @@ bool BotManager::findMapCallout (StringRef name, Vector &position) {
 }
 
 void BotManager::captureChatRadio (StringRef cmd, StringRef arg, edict_t *ent) {
+   if (!game.isBotCmd () && !game.isFakeClientEntity (ent) && (cmd == "say" || cmd == "say_team"))
+      m_casualBanter.lastHuman = game.time ();
    if (game.isBotCmd ()) {
       return;
    }

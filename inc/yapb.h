@@ -21,6 +21,7 @@ using namespace cr;
 #include <constant.h>
 #include <chatlib.h>
 #include <combat_behavior.h>
+#include <combat_tracking.h>
 #include <enemy_damage.h>
 #include <idle_aim.h>
 #include <view_timing.h>
@@ -717,6 +718,10 @@ public:
    edict_t *m_bodyChoiceEnemy {};
    edict_t *m_aimSampleEnemy {};
    Vector m_sampledCombatAim {};
+   Vector m_sampledCombatVelocity {};
+   float m_combatSampleTime {};
+   float m_combatSampleGravity {};
+   bool m_combatSampleBallistic {};
    float m_nextCombatAimSample {};
    float m_combatSettledAt {};
    float m_underPressureUntil {};

@@ -176,7 +176,7 @@ void Bot::updateLookAngles (bool navigationOnly) {
    direction.clampAngles ();
 
    // lower skilled bot's have lower aiming
-   if (m_difficulty == Difficulty::Noob && !navigationAim) {
+   if (m_difficulty == Difficulty::Noob && !navigationAim && !(m_aimFlags & AimFlags::Enemy)) {
       updateLookAnglesNewbie (direction, delta);
       updateBodyAngles ();
 
@@ -212,6 +212,7 @@ void Bot::updateLookAngles (bool navigationOnly) {
       const auto behavior = combatBehavior (m_difficulty);
       accelerate = behavior.turnAcceleration;
       stiffness = behavior.turnStiffness;
+      if (m_aimFlags & AimFlags::Enemy) stiffness *= combatStiffnessMultiplier (m_difficulty, activeAimStiffness ());
       damping = 28.0f;
    }
    m_idealAngles = pev->v_angle;
